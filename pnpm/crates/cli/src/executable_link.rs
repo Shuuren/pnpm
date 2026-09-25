@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fs, io,
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
@@ -7,8 +8,14 @@ use std::{
 /// Publish `src` at `dest` without pulling an executable out from under a
 /// concurrent process. A hard link avoids copying on the common same-filesystem
 /// path; an atomic rename publishes either form only after it is complete.
+///
+/// A symlink `src` is resolved to the file it names before that hard link or
+/// copy. [`fs::hard_link`] links the symlink entry itself, so a relative link
+/// published into another directory would dangle there. A symlink that does
+/// not resolve is an error.
 pub(crate) fn replace_executable(src: &Path, dest: &Path) -> std::io::Result<()> {
-    if same_file::is_same_file(src, dest).unwrap_or(false) {
+    let src = follow_source_symlink(src)?;
+    if same_file::is_same_file(src.as_ref(), dest).unwrap_or(false) {
         return Ok(());
     }
     let staged = staging_path(dest);
@@ -22,12 +29,13 @@ pub(crate) fn replace_executable(src: &Path, dest: &Path) -> std::io::Result<()>
         #[cfg(unix)]
         let src_is_executable = {
             use std::os::unix::fs::PermissionsExt as _;
-            fs::metadata(src).is_ok_and(|metadata| metadata.permissions().mode() & 0o111 == 0o111)
+            fs::metadata(src.as_ref())
+                .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 == 0o111)
         };
         #[cfg(not(unix))]
         let src_is_executable = true;
-        if !(src_is_executable && fs::hard_link(src, &staged).is_ok()) {
-            let mut source = fs::File::open(src)?;
+        if !(src_is_executable && fs::hard_link(src.as_ref(), &staged).is_ok()) {
+            let mut source = fs::File::open(src.as_ref())?;
             let mut output = fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -78,3 +86,15 @@ fn swap_into_place(staged: &Path, dest: &Path) -> std::io::Result<()> {
     }
     fs::rename(staged, dest)
 }
+
+fn follow_source_symlink(src: &Path) -> io::Result<Cow<'_, Path>> {
+    match fs::symlink_metadata(src) {
+        Ok(metadata) if metadata.file_type().is_symlink() => fs::canonicalize(src).map(Cow::Owned),
+        Ok(_) => Ok(Cow::Borrowed(src)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Cow::Borrowed(src)),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests;
