@@ -38,7 +38,7 @@ pub enum BuildPhaseError {
 
     /// Surfaces a failure from the post-`BuildModules` per-importer
     /// top-level bin link. This pass mixes direct + publicly-hoisted
-    /// candidates so `pnpm_cmd_shim::pick_winner` (private)'s
+    /// candidates so [`pnpm_cmd_shim::choose_bins`]'s
     /// [`pnpm_cmd_shim::BinOrigin::Direct`] tier resolves
     /// conflicts in a single call (pnpm/pacquet#342). The failure
     /// surface is the project-tree top-level

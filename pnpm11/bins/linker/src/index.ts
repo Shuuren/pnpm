@@ -17,7 +17,6 @@ import { isSubdir } from 'is-subdir'
 import isWindows from 'is-windows'
 import normalizePath from 'normalize-path'
 import { groupBy, isEmpty, partition, unnest } from 'ramda'
-import semver from 'semver'
 import { symlinkDir } from 'symlink-dir'
 
 import { getBinNodePaths } from './getBinNodePaths.js'
@@ -203,21 +202,57 @@ function deduplicateCommands (commands: CommandInfo[], binsDir?: string): Comman
 }
 
 function resolveCommandConflicts (group: CommandInfo[], binsDir?: string): CommandInfo {
-  return group.reduce((a, b) => {
-    const [chosen, skipped] = compareCommandsInConflict(a, b) >= 0 ? [a, b] : [b, a]
-    if (binsDir != null) logCommandConflict(chosen, skipped, binsDir)
+  const distinct = uniqueCommandsByDir(group)
+  if (distinct.length === 1) return distinct[0]
+
+  const owners = distinct.filter(cmd => pkgOwnsBin(cmd.name, cmd.pkgName))
+  if (owners.length === 1) {
+    const chosen = owners[0]
+    if (binsDir != null) {
+      for (const skipped of distinct) {
+        if (skipped !== chosen) logCommandConflict(chosen, skipped, binsDir)
+      }
+    }
     return chosen
-  })
+  }
+
+  throw new PnpmError(
+    'BINARIES_CONFLICT',
+    `Cannot link binary "${distinct[0].name}": ${formatBinProviders(distinct)} provide it`,
+    {
+      hint: 'Remove one of the dependencies that provides this binary.',
+    }
+  )
 }
 
-function compareCommandsInConflict (a: CommandInfo, b: CommandInfo): number {
-  // Check ownership: a package that owns the bin name gets priority
-  const aOwns = pkgOwnsBin(a.name, a.pkgName)
-  const bOwns = pkgOwnsBin(b.name, b.pkgName)
-  if (aOwns && !bOwns) return 1
-  if (!aOwns && bOwns) return -1
-  if (a.pkgName !== b.pkgName) return a.pkgName.localeCompare(b.pkgName) // it's pointless to compare versions of 2 different package
-  return semver.compare(a.pkgVersion, b.pkgVersion)
+function uniqueCommandsByDir (commands: CommandInfo[]): CommandInfo[] {
+  const seen = new Set<string>()
+  const unique: CommandInfo[] = []
+  for (const command of commands) {
+    const dir = normalizePath(command.pkgDir)
+    if (seen.has(dir)) continue
+    seen.add(dir)
+    unique.push(command)
+  }
+  return unique
+}
+
+function formatBinProviders (commands: CommandInfo[]): string {
+  return commands.map(providerLabel).sort().join(', ')
+}
+
+function providerLabel (cmd: CommandInfo): string {
+  const alias = packageAlias(cmd.pkgDir)
+  const id = cmd.pkgVersion ? `${cmd.pkgName}@${cmd.pkgVersion}` : cmd.pkgName
+  if (alias === cmd.pkgName || alias === '') return `"${id}"`
+  return `"${alias}" (${id})`
+}
+
+function packageAlias (pkgDir: string): string {
+  const base = path.basename(pkgDir)
+  const parent = path.basename(path.dirname(pkgDir))
+  if (parent[0] === '@') return `${parent}/${base}`
+  return base
 }
 
 function logCommandConflict (chosen: CommandInfo, skipped: CommandInfo, binsDir: string): void {

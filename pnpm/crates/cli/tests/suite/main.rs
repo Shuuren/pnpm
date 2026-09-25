@@ -28,6 +28,7 @@ mod catalog_local_deps;
 mod change;
 mod ci_frozen_lockfile;
 mod clean;
+mod colliding_bins;
 mod completion;
 mod concurrency_groups;
 mod config_dependencies;

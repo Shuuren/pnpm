@@ -1556,9 +1556,6 @@ importers:
       ramda:
         specifier: 'catalog:'
         version: '@pnpm/ramda@0.28.1'
-      semver:
-        specifier: 'catalog:'
-        version: 7.8.5
       symlink-dir:
         specifier: 'catalog:'
         version: 10.0.3
@@ -1587,9 +1584,6 @@ importers:
       '@types/ramda':
         specifier: 'catalog:'
         version: 0.32.0
-      '@types/semver':
-        specifier: 'catalog:'
-        version: 7.8.0
       cmd-extension:
         specifier: 'catalog:'
         version: 2.0.0

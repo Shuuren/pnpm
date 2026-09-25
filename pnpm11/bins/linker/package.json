@@ -47,7 +47,6 @@
     "is-windows": "catalog:",
     "normalize-path": "catalog:",
     "ramda": "catalog:",
-    "semver": "catalog:",
     "symlink-dir": "catalog:"
   },
   "peerDependencies": {
@@ -62,7 +61,6 @@
     "@types/node": "catalog:",
     "@types/normalize-path": "catalog:",
     "@types/ramda": "catalog:",
-    "@types/semver": "catalog:",
     "cmd-extension": "catalog:",
     "tempy": "catalog:"
   },

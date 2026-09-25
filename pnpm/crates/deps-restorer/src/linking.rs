@@ -121,7 +121,7 @@ pub struct LinkPhaseOutput {
     /// competes for the same `<root>/node_modules/.bin` slot as a root
     /// direct dep's; per pnpm/pacquet#342 the direct dep must win. The
     /// post-`BuildModules` top-level bin link takes both candidate lists
-    /// so `pick_winner`'s [`BinOrigin`] tier settles it in one call.
+    /// so `choose_bins`'s [`BinOrigin`] tier settles it in one call.
     ///
     /// [`BinOrigin`]: pnpm_cmd_shim::BinOrigin
     pub publicly_hoisted_for_post_build: Vec<String>,

@@ -14,9 +14,9 @@ use crate::{PackageManifests, SkippedSnapshots};
 use derive_more::{Display, Error};
 use miette::Diagnostic;
 use pnpm_cmd_shim::{
-    FsCreateDirAll, FsEnsureExecutableBits, FsReadDir, FsReadFile, FsReadHead, FsReadToString,
-    FsSetExecutable, FsWalkFiles, FsWrite, Host, LinkBinsError, LinkBinsOptions, PackageBinSource,
-    collect_packages_in_modules_dir, link_bins_of_packages,
+    BinOrigin, FsCreateDirAll, FsEnsureExecutableBits, FsReadDir, FsReadFile, FsReadHead,
+    FsReadToString, FsSetExecutable, FsWalkFiles, FsWrite, Host, LinkBinsError, LinkBinsOptions,
+    PackageBinSource, collect_packages_in_modules_dir, link_bins_of_packages,
 };
 use pnpm_lockfile::{LockfileResolution, PackageKey, PackageMetadata, PkgName, SnapshotEntry};
 use rayon::prelude::*;
@@ -337,7 +337,11 @@ struct SlotBinContext<'a> {
 ///    there is nothing to write — so for a package like
 ///    `hello-world-js-bin` (no deps, one bin) this writes
 ///    `<slot>/node_modules/<pkg>/node_modules/.bin/<pkg>` as a
-///    self-shim.
+///    self-shim. The own package is `BinOrigin::Hoisted`: a dependency
+///    that declares the same command is the provider in this directory,
+///    and the self-shim is written only for a command no dependency
+///    declares. Two dependencies that declare the same command still
+///    conflict.
 fn link_slot_bins<Sys>(
     context: &SlotBinContext<'_>,
     slot_key: &PackageKey,
@@ -384,6 +388,7 @@ where
     // The slot's own package dir is a real directory already, so it
     // doubles as its own resolved location.
     if self_has_bin {
+        let own_package_at = bin_sources.len();
         push_bin_source::<Sys>(
             &mut bin_sources,
             context.package_manifests,
@@ -391,6 +396,9 @@ where
             self_pkg_dir.clone(),
             self_pkg_dir,
         )?;
+        for source in &mut bin_sources[own_package_at..] {
+            source.origin = BinOrigin::Hoisted;
+        }
     }
 
     if bin_sources.is_empty() {

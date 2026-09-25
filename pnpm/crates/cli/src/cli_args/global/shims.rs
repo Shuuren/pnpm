@@ -49,7 +49,10 @@ pub(super) fn link_global_bins(
         // A slot turning direct again (its package's shim switched off)
         // must not keep the native shim, which would shadow the direct
         // shim on Windows and hold a stale target everywhere.
-        for (command, _) in choose_bins::<CmdShimHost>(&direct, bins_to_skip) {
+        for (command, _) in choose_bins::<CmdShimHost>(&direct, bins_to_skip)
+            .into_diagnostic()
+            .wrap_err("resolve direct global package bins")?
+        {
             remove_native_shim(global_bin_dir, &command.name)
                 .into_diagnostic()
                 .wrap_err_with(|| format!("remove the stale {} shim", command.name))?;
@@ -63,7 +66,10 @@ pub(super) fn link_global_bins(
         .map_err(miette::Report::new)
         .wrap_err("link direct global package bins")?;
     }
-    for (command, _) in choose_bins::<CmdShimHost>(&context_aware, bins_to_skip) {
+    for (command, _) in choose_bins::<CmdShimHost>(&context_aware, bins_to_skip)
+        .into_diagnostic()
+        .wrap_err("resolve context-aware global package bins")?
+    {
         install_native_shim(global_bin_dir, &command.name, &ShimTarget::Installed(command.path))
             .into_diagnostic()
             .wrap_err_with(|| format!("install the {} shim", command.name))?;

@@ -36,7 +36,7 @@ fn link_bins_of_packages_no_op_when_no_bins() {
 }
 
 #[test]
-fn lexical_compare_breaks_tie_when_neither_owns() {
+fn neither_owner_of_a_shared_bin_is_an_error() {
     let tmp = tempdir().unwrap();
     let alpha = tmp.path().join("alpha");
     let beta = tmp.path().join("beta");
@@ -61,9 +61,7 @@ fn lexical_compare_breaks_tie_when_neither_owns() {
         serde_json::from_slice(&read_file(beta.join("package.json")).unwrap()).unwrap();
 
     let bins = tmp.path().join(".bin");
-    // Order beta-then-alpha to verify the choice doesn't depend on
-    // discovery order.
-    link_bins_of_packages::<Host>(
+    let err = link_bins_of_packages::<Host>(
         &[
             PackageBinSource::new(beta, Arc::new(manifest_beta)),
             PackageBinSource::new(alpha, Arc::new(manifest_alpha)),
@@ -71,13 +69,12 @@ fn lexical_compare_breaks_tie_when_neither_owns() {
         &bins,
         &LinkBinsOptions::default(),
     )
-    .unwrap();
+    .expect_err("two packages that do not own the bin must not link");
 
-    let body = read_to_string(bins.join("shared")).unwrap();
-    assert!(
-        body.contains("/alpha/cmd.js"),
-        "lexically smaller package name `alpha` must win, got body:\n{body}",
-    );
+    let message = err.to_string();
+    eprintln!("conflict message: {message}");
+    assert_eq!(message, "Cannot link binary \"shared\": \"alpha\", \"beta\" provide it");
+    assert!(!bins.join("shared").exists(), "a colliding bin must not be written");
 }
 
 /// [`link_bins`] must NOT skip when only the canonical shim exists.
@@ -549,6 +546,7 @@ fn choose_bins_matches_exclusions_case_insensitively_only_on_windows() {
     let exclude_bins = std::collections::HashSet::from(["Shared".to_owned()]);
 
     let chosen: Vec<String> = crate::choose_bins::<Host>(&packages, &exclude_bins)
+        .expect("choose bins")
         .into_iter()
         .map(|(command, _)| command.name)
         .collect();
