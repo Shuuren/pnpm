@@ -109,15 +109,52 @@ fn build_graph(
     build_task_graph(&BuildTaskGraphOptions {
         project_dependencies: &project_dependencies,
         select_scripts: |project: &Path, task_name: &str| {
-            scripts_by_dir[project]
-                .iter()
-                .filter(|script| *script == task_name)
-                .cloned()
-                .collect()
+            matched_scripts(&scripts_by_dir[project], task_name)
         },
         task_name,
         tasks: task_settings,
     })
+}
+
+/// The script names `task_name` selects, including a `/regexp/` selector.
+/// Exact names win. The patterns below are the ones these tests pass.
+fn matched_scripts(scripts: &[String], task_name: &str) -> Vec<String> {
+    if scripts
+        .iter()
+        .any(|script| script == task_name)
+    {
+        return vec![task_name.to_string()];
+    }
+    let Some(pattern) = task_name
+        .strip_prefix('/')
+        .and_then(|name| name.strip_suffix('/'))
+    else {
+        return Vec::new();
+    };
+    if let Some(inner) = pattern
+        .strip_prefix("^(")
+        .and_then(|rest| rest.strip_suffix(")$"))
+    {
+        let names: Vec<&str> = inner.split('|').collect();
+        return scripts
+            .iter()
+            .filter(|script| names.contains(&script.as_str()))
+            .cloned()
+            .collect();
+    }
+    if let Some(prefix) = pattern.strip_prefix('^') {
+        let prefix = prefix.strip_suffix(".*").unwrap_or(prefix);
+        return scripts
+            .iter()
+            .filter(|script| script.starts_with(prefix))
+            .cloned()
+            .collect();
+    }
+    scripts
+        .iter()
+        .filter(|script| script.contains(pattern))
+        .cloned()
+        .collect()
 }
 
 #[test]
@@ -210,6 +247,65 @@ fn same_project_depends_on_entry_pulls_the_named_task_into_the_graph() {
     assert_eq!(graph[&key("a", "build")].dependencies, vec![key("b", "build")]);
     assert!(!graph[&key("a", "build")].requested);
     assert!(graph[&key("a", "test")].requested);
+}
+
+#[test]
+fn regexp_selector_runs_the_depends_on_of_the_scripts_it_matches() {
+    let settings = tasks(&[("build", Some(&["^build"])), ("test", Some(&["build"]))]);
+    let graph = build_graph(
+        &[("a", project(&["b"], &["build", "test"])), ("b", project(&[], &["build", "test"]))],
+        "/test/",
+        Some(&settings),
+    );
+
+    assert_eq!(graph[&key("a", "test")].scripts, vec!["test".to_string()]);
+    assert_eq!(graph[&key("a", "test")].dependencies, vec![key("a", "build")]);
+    assert_eq!(graph[&key("a", "build")].dependencies, vec![key("b", "build")]);
+    assert_eq!(graph[&key("b", "test")].dependencies, vec![key("b", "build")]);
+    assert!(graph[&key("a", "test")].requested);
+    assert!(!graph[&key("a", "build")].requested);
+}
+
+#[test]
+fn matched_scripts_that_depend_on_each_other_are_ordered_in_the_graph() {
+    let settings = tasks(&[
+        ("build", Some(&["^build"])),
+        ("other", Some(&["^other"])),
+        ("test", Some(&["build"])),
+    ]);
+    let mut graph = build_graph(
+        &[("a", project(&[], &["build", "test", "other"]))],
+        "/^(build|test|other)$/",
+        Some(&settings),
+    );
+
+    assert_eq!(graph[&key("a", "test")].dependencies, vec![key("a", "build")]);
+    assert!(graph[&key("a", "build")].dependencies.is_empty());
+    assert!(graph[&key("a", "other")].dependencies.is_empty());
+    assert!(graph[&key("a", "build")].requested);
+    assert!(graph[&key("a", "other")].requested);
+    let order = sequence(&mut graph).expect("the graph is acyclic");
+    let position = |name: &str| {
+        order
+            .iter()
+            .position(|found| found == &key("a", name))
+            .expect(name)
+    };
+    assert!(position("build") < position("test"));
+}
+
+#[test]
+fn regexp_that_is_itself_a_tasks_key_keeps_that_declaration() {
+    let settings = tasks(&[("/^build:/", Some(&["codegen"])), ("codegen", Some(&[]))]);
+    let graph = build_graph(
+        &[("a", project(&[], &["build:app", "codegen"]))],
+        "/^build:/",
+        Some(&settings),
+    );
+
+    assert_eq!(graph[&key("a", "/^build:/")].scripts, vec!["build:app".to_string()]);
+    assert_eq!(graph[&key("a", "/^build:/")].dependencies, vec![key("a", "codegen")]);
+    assert!(!graph.contains_key(&key("a", "build:app")));
 }
 
 #[test]

@@ -128,19 +128,36 @@ pub fn resume_task_graph_from(
     task_name: &str,
     completed_tasks: Option<&HashSet<TaskKey>>,
 ) -> TaskGraph {
-    let anchor =
-        TaskKey { project: anchor_project.to_path_buf(), task_name: task_name.to_string() };
-    let Some(anchor_node) = graph.get(&anchor) else {
-        // The anchor exists but its task is not in this graph: there is
-        // nothing to skip.
-        return graph;
+    let exact = TaskKey { project: anchor_project.to_path_buf(), task_name: task_name.to_string() };
+    // A regexp selector is expanded into the scripts it matched, so the
+    // anchor's task is no longer named the selector. Skip the dependencies
+    // of every requested task in the anchor project.
+    let anchor_keys: Vec<TaskKey> = if graph.contains_key(&exact) {
+        vec![exact]
+    } else {
+        graph
+            .iter()
+            .filter(|(_, node)| node.requested && node.project == anchor_project)
+            .map(|(key, _)| key.clone())
+            .collect()
     };
+    if anchor_keys.is_empty() {
+        return graph;
+    }
+    let anchor_key_set: HashSet<TaskKey> = anchor_keys.iter().cloned().collect();
     let dropped = completed_tasks.map_or_else(
-        || transitive_dependencies(&graph, anchor_node),
+        || {
+            anchor_keys
+                .iter()
+                .fold(HashSet::new(), |mut dropped, key| {
+                    dropped.extend(transitive_dependencies(&graph, &graph[key]));
+                    dropped
+                })
+        },
         |completed| {
             completed
                 .iter()
-                .filter(|key| **key != anchor && graph.contains_key(*key))
+                .filter(|key| !anchor_key_set.contains(*key) && graph.contains_key(*key))
                 .cloned()
                 .collect()
         },

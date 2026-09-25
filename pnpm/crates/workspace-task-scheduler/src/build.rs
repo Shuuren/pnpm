@@ -5,9 +5,12 @@ use super::{
 
 /// Build the graph of tasks the invocation runs: a task named `task_name`
 /// in every selected project, plus every task those transitively pull in
-/// through `dependsOn`. A task with no `tasks` entry behaves as
-/// `dependsOn: ['^<its own name>']`: plain topological order over the
-/// project graph.
+/// through `dependsOn`. A regexp `task_name` that is not itself a `tasks`
+/// key is replaced, in each project, by the scripts it matches there, one
+/// task per script, so each script's `dependsOn` applies. A project where
+/// nothing matches keeps the selector as a pass-through. A task with no
+/// `tasks` entry behaves as `dependsOn: ['^<its own name>']`: plain
+/// topological order over the project graph.
 pub fn build_task_graph<SelectScripts>(
     options: &BuildTaskGraphOptions<'_, SelectScripts>,
 ) -> TaskGraph
@@ -114,19 +117,45 @@ where
 
     /// Every requested task of every seed project, which is either the
     /// explicitly requested projects or the whole workspace.
+    ///
+    /// A `/regexp/` selector is not a `tasks` key, so the tasks it runs in
+    /// a project are the scripts it matched there. Each of those is its
+    /// own task: `dependsOn` is looked up by script name, and matched
+    /// scripts that depend on each other are ordered. A project where
+    /// nothing matches keeps the selector as a pass-through. A selector
+    /// that is itself a `tasks` key stays one task.
     fn seed_queue(&self) -> VecDeque<(PathBuf, String, bool)> {
-        let seed_projects: Vec<&PathBuf> = match self.requested_projects {
+        let mut queue = VecDeque::new();
+        for project in self.seed_projects() {
+            for selector in self.task_names {
+                for task_name in self.project_seed_names(project, selector) {
+                    queue.push_back((project.clone(), task_name, true));
+                }
+            }
+        }
+        queue
+    }
+
+    fn seed_projects(&self) -> Vec<&PathBuf> {
+        match self.requested_projects {
             Some(requested) => requested.iter().collect(),
             None => self.project_dependencies.keys().collect(),
-        };
-        seed_projects
-            .into_iter()
-            .flat_map(|project| {
-                self.task_names
-                    .iter()
-                    .map(|task_name| (project.clone(), (*task_name).to_string(), true))
-            })
-            .collect()
+        }
+    }
+
+    fn project_seed_names(&self, project: &Path, selector: &str) -> Vec<String> {
+        if self.tasks.is_some_and(|tasks| tasks.contains_key(selector)) {
+            return vec![selector.to_string()];
+        }
+        let mut names = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for name in (self.select_scripts)(project, selector) {
+            if name == selector || !seen.insert(name.clone()) {
+                continue;
+            }
+            names.push(name);
+        }
+        if names.is_empty() { vec![selector.to_string()] } else { names }
     }
 
     /// The tasks `task_name` at `project` depends on, in declaration order

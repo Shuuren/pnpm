@@ -49,15 +49,26 @@ export interface BuildTaskGraphOptions {
 /**
  * Builds the graph of tasks the invocation runs: a task named `taskName` in
  * every selected project, plus every task those transitively pull in through
- * `dependsOn`. A task with no `tasks` entry behaves as
- * `dependsOn: ['^<its own name>']`: plain topological order over the
- * project graph.
+ * `dependsOn`. A regexp `taskName` that is not itself a `tasks` key is
+ * replaced, in each project, by the scripts it matches there, one task per
+ * script, so each script's `dependsOn` applies. A project where nothing
+ * matches keeps the selector as a pass-through. A task with no `tasks`
+ * entry behaves as `dependsOn: ['^<its own name>']`: plain topological
+ * order over the project graph.
  */
 export function buildTaskGraph (opts: BuildTaskGraphOptions): TaskGraph {
   const graph: TaskGraph = new Map()
   const queue: Array<{ project: ProjectRootDir, taskName: string, requested: boolean }> = []
+  // A `/regexp/` selector is not a `tasks` key, so the tasks it runs in a
+  // project are the scripts it matched there. Each of those is its own
+  // task: `dependsOn` is looked up by script name, and matched scripts that
+  // depend on each other are ordered. A project where nothing matches keeps
+  // the selector as a pass-through. A selector that is itself a `tasks` key
+  // stays one task.
   for (const project of opts.projectDependencies.keys()) {
-    queue.push({ project, taskName: opts.taskName, requested: true })
+    for (const taskName of projectSeedNames(opts, project)) {
+      queue.push({ project, taskName, requested: true })
+    }
   }
   // Drained by index: shift() moves every remaining element, which is
   // quadratic over a workspace-sized queue.
@@ -93,6 +104,20 @@ export function buildTaskGraph (opts: BuildTaskGraphOptions): TaskGraph {
     })
   }
   return graph
+}
+
+function projectSeedNames (opts: BuildTaskGraphOptions, project: ProjectRootDir): string[] {
+  if (opts.tasks != null && Object.hasOwn(opts.tasks, opts.taskName)) {
+    return [opts.taskName]
+  }
+  const names: string[] = []
+  const seen = new Set<string>()
+  for (const name of opts.selectScripts(opts.scriptsByProject(project), opts.taskName)) {
+    if (name === opts.taskName || seen.has(name)) continue
+    seen.add(name)
+    names.push(name)
+  }
+  return names.length > 0 ? names : [opts.taskName]
 }
 
 function taskConcurrency (tasks: WorkspaceTasks | undefined, taskName: string): number | undefined {
@@ -214,16 +239,24 @@ export function resumeTaskGraphFrom (graph: TaskGraph, opts: ResumeTaskGraphOpti
   if (!anchorProject) {
     throw new PnpmError('RESUME_FROM_NOT_FOUND', `Cannot find package ${opts.resumeFrom}. Could not determine where to resume from.`)
   }
-  const anchor = graph.get(taskKey(anchorProject, opts.taskName))
-  if (anchor == null) {
-    // The anchor exists but its task is not in this graph (e.g. a
-    // non-recursive invocation): there is nothing to skip.
+  const anchorKey = taskKey(anchorProject, opts.taskName)
+  const exact = graph.get(anchorKey)
+  // A regexp selector is expanded into the scripts it matched, so the
+  // anchor's task is no longer named the selector. Skip the dependencies
+  // of every requested task in the anchor project.
+  const anchors = exact != null
+    ? [exact]
+    : [...graph.values()].filter((node) => node.requested && node.project === anchorProject)
+  if (anchors.length === 0) {
     return graph
   }
-  const anchorKey = taskKey(anchorProject, opts.taskName)
+  const anchorKeys = new Set(anchors.map((node) => taskKey(node.project, node.taskName)))
   const dropped = opts.completedTasks == null
-    ? transitiveDependencies(graph, anchor)
-    : new Set([...opts.completedTasks].filter((key) => key !== anchorKey && graph.has(key)))
+    ? anchors.reduce((dependencies, anchor) => {
+      for (const key of transitiveDependencies(graph, anchor)) dependencies.add(key)
+      return dependencies
+    }, new Set<TaskKey>())
+    : new Set([...opts.completedTasks].filter((key) => !anchorKeys.has(key) && graph.has(key)))
   const resumed: TaskGraph = new Map()
   for (const [key, node] of graph) {
     if (dropped.has(key)) continue

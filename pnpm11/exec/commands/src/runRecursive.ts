@@ -137,10 +137,7 @@ export async function runRecursive (
   }
 
   if (!process.env.npm_lifecycle_event) {
-    for (const node of taskGraph.values()) {
-      if (!node.requested) continue
-      node.scripts = throwOrFilterHiddenScripts(node.scripts, scriptName)
-    }
+    filterHiddenRequestedScripts(taskGraph, scriptName)
   }
 
   // Before anything is dispatched: when no selected project has the script,
@@ -219,7 +216,7 @@ export async function runRecursive (
           return
         }
         if (!taskFailed) {
-          result[summaryKey].status = 'running'
+          mergeSummaryStatus(result, summaryKey, { status: 'running' })
         }
         const startTime = process.hrtime()
         if (node.requested) {
@@ -275,19 +272,21 @@ export async function runRecursive (
           await _runScript(script)
           groupEnd?.()
           if (!taskFailed) {
-            result[summaryKey].status = 'passed'
-            result[summaryKey].duration = getExecutionDuration(startTime)
+            mergeSummaryStatus(result, summaryKey, {
+              status: 'passed',
+              duration: getExecutionDuration(startTime),
+            })
           }
         } catch (err: unknown) {
           assert(util.types.isNativeError(err))
           taskFailed = true
-          result[summaryKey] = {
+          mergeSummaryStatus(result, summaryKey, {
             status: 'failure',
             duration: getExecutionDuration(startTime),
             error: err,
             message: err.message,
             prefix: node.project,
-          }
+          })
           if (opts.bail && firstError == null) {
             Object.assign(err, {
               code: 'ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL',
@@ -309,7 +308,7 @@ export async function runRecursive (
       bail: Boolean(opts.bail),
       runTask,
       onTaskSkipped: (node) => {
-        result[taskSummaryKey(node)].status = 'skipped'
+        mergeSummaryStatus(result, taskSummaryKey(node), { status: 'skipped' })
       },
     })
 
@@ -391,6 +390,53 @@ function noRequestedScriptError (scriptName: string, opts: RecursiveRunOpts): Pn
 
 function taskSummaryKey (node: TaskNode): string {
   return node.requested ? node.project : `${node.project}#${node.taskName}`
+}
+
+/**
+ * Several requested tasks in one project share the project directory key
+ * `pnpm-exec-summary.json` consumers read. A failure outranks a pass, and
+ * a skip must not erase either: a regexp selector is one task per matched
+ * script, and those tasks record into the same slot.
+ */
+function mergeSummaryStatus (result: RecursiveSummary, summaryKey: string, next: RecursiveSummary[string]): void {
+  const current = result[summaryKey]
+  if (current.status === 'failure') return
+  if (summaryStatusRank(next.status) >= summaryStatusRank(current.status)) {
+    result[summaryKey] = next
+  }
+}
+
+function summaryStatusRank (status: RecursiveSummary[string]['status']): number {
+  switch (status) {
+    case 'queued': return 0
+    case 'skipped': return 1
+    case 'running': return 2
+    case 'passed': return 3
+    case 'failure': return 4
+  }
+}
+
+/**
+ * Hidden scripts are filtered across every requested task of a project.
+ * A regexp selector is one task per matched script, so a hidden match and
+ * a visible match are no longer scripts of the same node; judging them
+ * separately would reject the hidden one even though a visible script
+ * also matched.
+ */
+function filterHiddenRequestedScripts (graph: TaskGraph, scriptName: string): void {
+  const byProject = new Map<ProjectRootDir, TaskNode[]>()
+  for (const node of graph.values()) {
+    if (!node.requested) continue
+    const nodes = byProject.get(node.project) ?? []
+    nodes.push(node)
+    byProject.set(node.project, nodes)
+  }
+  for (const nodes of byProject.values()) {
+    const visible = new Set(throwOrFilterHiddenScripts(nodes.flatMap((node) => node.scripts), scriptName))
+    for (const node of nodes) {
+      node.scripts = node.scripts.filter((script) => visible.has(script))
+    }
+  }
 }
 
 function formatSectionName ({

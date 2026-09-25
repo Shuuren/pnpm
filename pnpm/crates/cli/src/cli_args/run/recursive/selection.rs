@@ -154,9 +154,26 @@ pub(super) fn filter_hidden_requested_scripts(
     if env::var_os("npm_lifecycle_event").is_some() {
         return Ok(());
     }
-    for node in task_graph.values_mut().filter(|node| node.requested) {
-        node.scripts =
-            throw_or_filter_hidden_scripts(std::mem::take(&mut node.scripts), script_name)?;
+    // A regexp selector is one task per matched script, so a hidden match
+    // and a visible match are no longer scripts of the same node. Judge
+    // every requested script of a project together, or the hidden one is
+    // rejected even though a visible script also matched.
+    let mut by_project: IndexMap<PathBuf, Vec<TaskKey>> = IndexMap::new();
+    for (key, node) in task_graph.iter().filter(|(_, node)| node.requested) {
+        by_project
+            .entry(node.project.clone())
+            .or_default()
+            .push(key.clone());
+    }
+    for keys in by_project.into_values() {
+        let combined = keys
+            .iter()
+            .flat_map(|key| task_graph[key].scripts.clone())
+            .collect();
+        let visible = throw_or_filter_hidden_scripts(combined, script_name)?;
+        for key in keys {
+            task_graph[&key].scripts.retain(|script| visible.contains(script));
+        }
     }
     Ok(())
 }

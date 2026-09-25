@@ -3,8 +3,9 @@ use super::{
     Ordering, Path, ProcessTracker, ProjectGraph, RecursiveRun, RunArgs, RunContext, RunResults,
     ScriptBudget, ScriptOutput, ScriptPermit, Status, TaskCompletion, TaskGraph, TaskKey, TaskNode,
     env, make_node_package_map_option, make_node_require_option, package_map_path_for_execution,
-    pnp_path_for_execution, run_stages, script_concurrency, task_summary_key,
+    pnp_path_for_execution, run_stages, script_concurrency,
 };
+use pnpm_workspace_task_scheduler::task_summary_key;
 
 /// The slots the tasks record into while they run.
 pub(super) struct RunSlots {
@@ -43,6 +44,29 @@ impl RunSlots {
     }
 }
 
+/// Several requested tasks in one project share the project directory key
+/// `pnpm-exec-summary.json` consumers read. A failure outranks a pass, and
+/// a skip must not erase either: a regexp selector is one task per matched
+/// script, and those tasks record into the same slot.
+pub(super) fn merge_execution_status(slot: &mut ExecutionStatus, incoming: ExecutionStatus) {
+    if slot.status == Status::Failure {
+        return;
+    }
+    if status_rank(incoming.status) >= status_rank(slot.status) {
+        *slot = incoming;
+    }
+}
+
+fn status_rank(status: Status) -> u8 {
+    match status {
+        Status::Queued => 0,
+        Status::Skipped => 1,
+        Status::Running => 2,
+        Status::Passed => 3,
+        Status::Failure => 4,
+    }
+}
+
 /// Runs one task's project against the run's shared state.
 pub(super) struct TaskRunner<'a, 'run, 'project> {
     pub(super) run: &'a RecursiveRun<'run, 'project>,
@@ -60,8 +84,16 @@ impl TaskRunner<'_, '_, '_> {
     pub(super) fn run_task(&self, node: &TaskNode) -> TaskCompletion {
         let summary_key = task_summary_key(node);
         let on_started = || {
-            self.outcome.result.lock().expect("summary lock is not poisoned")[&summary_key]
-                .status = Status::Running;
+            let mut result = self.outcome.result.lock().expect("summary lock is not poisoned");
+            merge_execution_status(
+                result.get_mut(&summary_key).expect("summary key exists"),
+                ExecutionStatus {
+                    status: Status::Running,
+                    duration: None,
+                    prefix: None,
+                    message: None,
+                },
+            );
         };
         let execution = run_project(&RunProjectOptions {
             node,
@@ -114,7 +146,13 @@ impl RunOutcome<'_> {
         let failed = execution.status.status == Status::Failure;
         let cancelled = execution.cancelled;
         let recursion_guarded = execution.recursion_guarded;
-        self.result.lock().expect("summary lock is not poisoned")[summary_key] = execution.status;
+        {
+            let mut result = self.result.lock().expect("summary lock is not poisoned");
+            merge_execution_status(
+                result.get_mut(summary_key).expect("summary key exists"),
+                execution.status,
+            );
+        }
         if cancelled {
             return TaskCompletion::Cancelled;
         }

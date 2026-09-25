@@ -9,9 +9,10 @@
 //! order under `workspaceConcurrency`, with no barrier between
 //! dependency-independent tasks. `--no-sort` drops the ordering entirely,
 //! `--reverse` runs the reverse graph, and `--parallel` starts every task
-//! concurrently. A task whose selector matched several scripts runs them
-//! side by side rather than one after another, and every script of the
-//! run draws on one [`ScriptBudget`], so `workspaceConcurrency` bounds
+//! concurrently. A regexp selector runs each matched script as its own
+//! task, so `dependsOn` orders them and independent matches still run
+//! side by side. Every script of the run draws on one [`ScriptBudget`],
+//! so `workspaceConcurrency` bounds
 //! the processes a run without `--parallel` has running, not the tasks
 //! it dispatched. The main-dispatch auto-exclusion of the workspace root
 //! is applied via [`AutoExcludeRoot::Enabled`].
@@ -31,7 +32,7 @@ use crate::cli_args::{
     verify_deps::verify_deps_before_recursive_run,
 };
 use derive_more::{Display, Error};
-use execution::{RunOutcome, RunSlots, TaskRunner};
+use execution::{RunOutcome, RunSlots, TaskRunner, merge_execution_status};
 use indexmap::IndexMap;
 use miette::{Diagnostic, IntoDiagnostic};
 use pnpm_config::Config;
@@ -400,8 +401,17 @@ impl RecursiveRun<'_, '_> {
         };
         let run_task = |node: &TaskNode| runner.run_task(node);
         let on_task_skipped = |node: &TaskNode| {
-            slots.result.lock().expect("summary lock is not poisoned")[&task_summary_key(node)]
-                .status = Status::Skipped;
+            let summary_key = task_summary_key(node);
+            let mut result = slots.result.lock().expect("summary lock is not poisoned");
+            merge_execution_status(
+                result.get_mut(&summary_key).expect("summary key exists"),
+                ExecutionStatus {
+                    status: Status::Skipped,
+                    duration: None,
+                    prefix: None,
+                    message: None,
+                },
+            );
         };
         schedule_tasks(
             &prepared.task_graph,
