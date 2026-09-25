@@ -43,7 +43,7 @@ import { extractAndRemoveDependencyBuildOptions, hasDependencyBuildOptions } fro
 import { getCacheDir, getConfigDir, getDataDir, getGlobalConfigPath, getStateDir } from './dirs.js'
 import { parseEnvVars } from './env.js'
 import { getNetworkConfigs } from './getNetworkConfigs.js'
-import { getOptionsFromPnpmSettings } from './getOptionsFromRootManifest.js'
+import { getOptionsFromPnpmSettings, mergeResolutionsIntoOverrides } from './getOptionsFromRootManifest.js'
 import { loadNpmrcConfig } from './loadNpmrcFiles.js'
 import { inheritDlxConfig, pickIniConfig } from './localConfig.js'
 import { npmDefaults } from './npmDefaults.js'
@@ -610,6 +610,8 @@ export async function getConfig (opts: {
         }
       }
     }
+
+    pnpmConfig.overrides = mergeResolutionsIntoOverrides(pnpmConfig.overrides, pnpmConfig.rootProjectManifest)
   }
 
   // Precedence: builtin < `_auth` file < .npmrc < yaml < `_auth` env < CLI. CLI

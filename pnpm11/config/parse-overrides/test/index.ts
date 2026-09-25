@@ -113,3 +113,29 @@ test('parseOverrides() throws when an empty range is used in a parent>child sele
     'Cannot use an empty range in the "bar>foo@" selector'
   )
 })
+
+test('parseOverrides() parses a Yarn parent/**/dep selective resolution', () => {
+  expect(parseOverrides({
+    'apollo-server-express/**/graphql-tools': '4.0.8',
+    '@scope/parent@1/**/@scope/dep@^2': '2.0.0',
+    '**/graphql-tools': '4.0.0',
+  }, {})).toEqual([
+    {
+      selector: 'apollo-server-express/**/graphql-tools',
+      newBareSpecifier: '4.0.8',
+      parentPkg: { name: 'apollo-server-express' },
+      targetPkg: { name: 'graphql-tools' },
+    },
+    {
+      selector: '@scope/parent@1/**/@scope/dep@^2',
+      newBareSpecifier: '2.0.0',
+      parentPkg: { name: '@scope/parent', bareSpecifier: '1' },
+      targetPkg: { name: '@scope/dep', bareSpecifier: '^2' },
+    },
+    {
+      selector: '**/graphql-tools',
+      newBareSpecifier: '4.0.0',
+      targetPkg: { name: 'graphql-tools' },
+    },
+  ])
+})

@@ -4,12 +4,37 @@ import util from 'node:util'
 import { afterEach, expect, test } from '@jest/globals'
 import type { PackageExtension, PnpmSettings } from '@pnpm/types'
 
-import { getOptionsFromPnpmSettings } from '../lib/getOptionsFromRootManifest.js'
+import { getOptionsFromPnpmSettings, mergeResolutionsIntoOverrides } from '../lib/getOptionsFromRootManifest.js'
 
 const ORIGINAL_ENV = process.env
 
 afterEach(() => {
   process.env = { ...ORIGINAL_ENV }
+})
+
+test('mergeResolutionsIntoOverrides() keeps overrides ahead of Yarn resolutions', () => {
+  expect(mergeResolutionsIntoOverrides(
+    { 'is-odd': '9.9.9' },
+    {
+      name: 'wiki',
+      dependencies: { 'is-odd': '^1.0.0' },
+      resolutions: {
+        'apollo-server-express/**/graphql-tools': '4.0.8',
+        'is-odd': '$is-odd',
+      },
+    }
+  )).toStrictEqual({
+    'apollo-server-express/**/graphql-tools': '4.0.8',
+    'is-odd': '9.9.9',
+  })
+})
+
+test('mergeResolutionsIntoOverrides() uses resolutions when overrides are absent', () => {
+  expect(mergeResolutionsIntoOverrides(undefined, {
+    resolutions: { '**/graphql-tools': '4.0.0' },
+  })).toStrictEqual({
+    '**/graphql-tools': '4.0.0',
+  })
 })
 
 test('getOptionsFromPnpmSettings() replaces env variables in settings', () => {

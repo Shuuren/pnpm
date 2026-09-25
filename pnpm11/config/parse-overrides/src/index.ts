@@ -5,6 +5,7 @@ import { parseWantedDependency } from '@pnpm/resolving.parse-wanted-dependency'
 import semver from 'semver'
 
 const DELIMITER_REGEX = /[^ |@]>/
+const YARN_NESTED_DELIMITER = '/**/'
 
 export interface VersionOverride {
   selector: string
@@ -69,6 +70,20 @@ function markConvergeOverride (override: VersionOverride): VersionOverride {
 
 export function parsePkgAndParentSelector (selector: string): Pick<VersionOverride, 'parentPkg' | 'targetPkg'> {
   const trimmedSelector = selector.trim()
+  // Yarn selective resolutions: `**/dep` names every copy of dep, and
+  // `parent/**/dep` names dep declared by that parent.
+  if (trimmedSelector.startsWith('**/')) {
+    return {
+      targetPkg: parsePkgSelector(trimmedSelector.slice('**/'.length)),
+    }
+  }
+  const nested = splitYarnNestedSelector(trimmedSelector)
+  if (nested != null) {
+    return {
+      parentPkg: parsePkgSelector(nested.parent),
+      targetPkg: parsePkgSelector(nested.child),
+    }
+  }
   let delimiterIndex = trimmedSelector.search(DELIMITER_REGEX)
   if (delimiterIndex !== -1) {
     delimiterIndex++
@@ -82,6 +97,15 @@ export function parsePkgAndParentSelector (selector: string): Pick<VersionOverri
   return {
     targetPkg: parsePkgSelector(trimmedSelector),
   }
+}
+
+function splitYarnNestedSelector (selector: string): { parent: string, child: string } | undefined {
+  const delimiterIndex = selector.indexOf(YARN_NESTED_DELIMITER)
+  if (delimiterIndex <= 0) return undefined
+  const parent = selector.slice(0, delimiterIndex)
+  const child = selector.slice(delimiterIndex + YARN_NESTED_DELIMITER.length)
+  if (child === '') return undefined
+  return { parent, child }
 }
 
 function parsePkgSelector (selector: string): PackageSelector {

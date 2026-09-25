@@ -65,6 +65,39 @@ test('createVersionsOverrider() does not fail on non-range selectors', () => {
   })
 })
 
+test('createVersionsOverrider() applies a Yarn parent/**/dep selector to that parent', () => {
+  const overrider = createVersionsOverrider(
+    parseOverrides({ 'apollo-server-express/**/graphql-tools': '4.0.8' }, {}),
+    process.cwd()
+  )
+  expect(overrider({
+    name: 'apollo-server-express',
+    version: '2.25.2',
+    dependencies: {
+      'graphql-tools': '^4.0.8',
+    },
+  })).toStrictEqual({
+    name: 'apollo-server-express',
+    version: '2.25.2',
+    dependencies: {
+      'graphql-tools': '4.0.8',
+    },
+  })
+  expect(overrider({
+    name: 'other',
+    version: '1.0.0',
+    dependencies: {
+      'graphql-tools': '^4.0.8',
+    },
+  })).toStrictEqual({
+    name: 'other',
+    version: '1.0.0',
+    dependencies: {
+      'graphql-tools': '^4.0.8',
+    },
+  })
+})
+
 test('createVersionsOverrider() overrides dependencies of specified packages only', () => {
   const overrider = createVersionsOverrider([
     {

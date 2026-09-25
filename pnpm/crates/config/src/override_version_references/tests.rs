@@ -1,4 +1,4 @@
-use super::resolve_version_references;
+use super::{merge_root_resolutions, resolve_version_references};
 use crate::workspace_yaml::LoadWorkspaceYamlError;
 use indexmap::IndexMap;
 use pretty_assertions::assert_eq;
@@ -17,6 +17,60 @@ fn overrides_map(entries: &[(&str, &str)]) -> IndexMap<String, String> {
         .iter()
         .map(|(selector, spec)| ((*selector).to_string(), (*spec).to_string()))
         .collect()
+}
+
+#[test]
+#[test]
+fn resolutions_are_merged_under_overrides() {
+    let root = root_with_manifest(&serde_json::json!({
+        "name": "wiki",
+        "dependencies": { "graphql-tools": "^4.0.8" },
+        "resolutions": {
+            "apollo-server-express/**/graphql-tools": "4.0.8",
+            "is-odd": "$is-odd",
+        },
+    }));
+    let mut overrides = Some(overrides_map(&[("is-odd", "9.9.9")]));
+
+    merge_root_resolutions(&mut overrides, root.path()).expect("merge resolutions");
+
+    assert_eq!(
+        overrides.expect("merged overrides"),
+        overrides_map(&[("apollo-server-express/**/graphql-tools", "4.0.8"), ("is-odd", "9.9.9"),]),
+    );
+}
+
+#[test]
+fn resolutions_alone_become_overrides() {
+    let root = root_with_manifest(&serde_json::json!({
+        "name": "wiki",
+        "resolutions": { "**/graphql-tools": "4.0.0" },
+    }));
+    let mut overrides = None;
+
+    merge_root_resolutions(&mut overrides, root.path()).expect("merge resolutions");
+
+    assert_eq!(
+        overrides.expect("resolutions copied"),
+        overrides_map(&[("**/graphql-tools", "4.0.0")]),
+    );
+}
+
+#[test]
+fn a_non_string_resolution_is_rejected() {
+    let root = root_with_manifest(&serde_json::json!({
+        "name": "wiki",
+        "resolutions": { "graphql-tools": 1 },
+    }));
+    let mut overrides = None;
+
+    let error = merge_root_resolutions(&mut overrides, root.path())
+        .expect_err("a numeric resolution is invalid");
+
+    assert!(
+        matches!(error, LoadWorkspaceYamlError::InvalidResolutionsValue { .. }),
+        "got: {error:?}"
+    );
 }
 
 #[test]

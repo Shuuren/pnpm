@@ -191,6 +191,16 @@ pub enum LoadWorkspaceYamlError {
     #[diagnostic(code(ERR_PNPM_CANNOT_RESOLVE_OVERRIDE_VERSION))]
     CannotResolveOverrideVersion { spec: String, dependency_name: String },
 
+    /// The root manifest's `resolutions` field is not an object.
+    #[display("The resolutions field should be an object")]
+    #[diagnostic(code(ERR_PNPM_INVALID_OVERRIDES))]
+    InvalidResolutions,
+
+    /// A `resolutions` entry is not a string specifier.
+    #[display(r#"The value of resolutions.{selector} should be a string, but got {received}"#)]
+    #[diagnostic(code(ERR_PNPM_INVALID_OVERRIDES))]
+    InvalidResolutionsValue { selector: String, received: &'static str },
+
     /// The signing trust root for remote side-effects artifacts appeared in a
     /// committed file. Only the global config yaml and the environment may
     /// carry it — see [`RemoteSideEffectsCacheSettings`](crate::workspace_yaml::sections::RemoteSideEffectsCacheSettings).

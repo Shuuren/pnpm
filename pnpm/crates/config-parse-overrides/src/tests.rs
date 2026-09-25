@@ -269,6 +269,47 @@ fn rejects_empty_range_in_parent_child_selector() {
 }
 
 #[test]
+fn parses_yarn_nested_selective_resolution() {
+    let input = HashMap::from([(
+        "apollo-server-express/**/graphql-tools".to_string(),
+        "4.0.8".to_string(),
+    )]);
+    let out = parse_overrides(&input, &Catalogs::new()).unwrap();
+    assert_eq!(
+        out,
+        vec![vo(
+            "apollo-server-express/**/graphql-tools",
+            "4.0.8",
+            Some(sel("apollo-server-express", None)),
+            sel("graphql-tools", None),
+        )],
+    );
+}
+
+#[test]
+fn parses_yarn_any_depth_selector_as_a_generic_override() {
+    let input = HashMap::from([("**/graphql-tools".to_string(), "4.0.0".to_string())]);
+    let out = parse_overrides(&input, &Catalogs::new()).unwrap();
+    assert_eq!(out, vec![vo("**/graphql-tools", "4.0.0", None, sel("graphql-tools", None))],);
+}
+
+#[test]
+fn parses_scoped_yarn_nested_selector_with_ranges() {
+    let input =
+        HashMap::from([("@scope/parent@1/**/@scope/dep@^2".to_string(), "2.0.0".to_string())]);
+    let out = parse_overrides(&input, &Catalogs::new()).unwrap();
+    assert_eq!(
+        out,
+        vec![vo(
+            "@scope/parent@1/**/@scope/dep@^2",
+            "2.0.0",
+            Some(sel("@scope/parent", Some("1"))),
+            sel("@scope/dep", Some("^2")),
+        )],
+    );
+}
+
+#[test]
 fn create_overrides_map_returns_resolved_specifiers() {
     let mut catalogs = Catalogs::new();
     let mut default = Catalog::new();

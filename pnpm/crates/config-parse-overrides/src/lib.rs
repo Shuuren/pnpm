@@ -182,6 +182,14 @@ pub fn parse_pkg_and_parent_selector(
     selector: &str,
 ) -> Result<(Option<PackageSelector>, PackageSelector), ParseOverridesError> {
     let trimmed_selector = selector.trim();
+    // Yarn selective resolutions: `**/dep` names every copy of dep, and
+    // `parent/**/dep` names dep declared by that parent.
+    if let Some(child) = trimmed_selector.strip_prefix("**/") {
+        return Ok((None, parse_pkg_selector(child)?));
+    }
+    if let Some((parent, child)) = split_yarn_nested_selector(trimmed_selector) {
+        return Ok((Some(parse_pkg_selector(parent)?), parse_pkg_selector(child)?));
+    }
     if let Some(delimiter_idx) = find_parent_delimiter(trimmed_selector) {
         let parent_selector = &trimmed_selector[..delimiter_idx];
         let child_selector = &trimmed_selector[delimiter_idx + 1..];
@@ -189,6 +197,22 @@ pub fn parse_pkg_and_parent_selector(
     } else {
         Ok((None, parse_pkg_selector(trimmed_selector)?))
     }
+}
+
+/// `parent/**/child` from a Yarn selective resolution. `None` when the
+/// selector is not that form (`**/child` is handled by the caller).
+fn split_yarn_nested_selector(selector: &str) -> Option<(&str, &str)> {
+    const DELIMITER: &str = "/**/";
+    let delimiter_idx = selector.find(DELIMITER)?;
+    if delimiter_idx == 0 {
+        return None;
+    }
+    let parent = &selector[..delimiter_idx];
+    let child = &selector[delimiter_idx + DELIMITER.len()..];
+    if child.is_empty() {
+        return None;
+    }
+    Some((parent, child))
 }
 
 /// Position of the `>` byte that separates parent from child, when

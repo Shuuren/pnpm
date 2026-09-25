@@ -121,6 +121,9 @@ impl Config {
 
         self.apply_env_settings::<Sys>(&mut explicit, &default_state_dir, start_dir);
 
+        let root_dir = self.root_project_manifest_dir(start_dir).to_path_buf();
+        crate::override_version_references::merge_root_resolutions(&mut self.overrides, &root_dir)?;
+
         if !self.explicit_settings.contains_key("lockfile") {
             self.lockfile = self.package_lock;
         }

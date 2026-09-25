@@ -37,6 +37,28 @@ fn undeclared(overrider: &VersionsOverrider, name: &str, spec: &str) -> Option<S
 }
 
 #[test]
+fn yarn_nested_selector_overrides_the_dependency_of_the_parent() {
+    let overrides = parsed(&[("apollo-server-express/**/graphql-tools", "4.0.8")]);
+    let overrider = VersionsOverrider::new(&overrides, Path::new("/workspace"));
+
+    let mut parent = manifest_from_value(json!({
+        "name": "apollo-server-express",
+        "version": "2.25.2",
+        "dependencies": { "graphql-tools": "^4.0.8" },
+    }));
+    overrider.apply(&mut parent, Some(Path::new("/workspace")));
+    assert_eq!(dep_spec(&parent, "dependencies", "graphql-tools"), Some("4.0.8"));
+
+    let mut unrelated = manifest_from_value(json!({
+        "name": "other",
+        "version": "1.0.0",
+        "dependencies": { "graphql-tools": "^4.0.8" },
+    }));
+    overrider.apply(&mut unrelated, Some(Path::new("/workspace")));
+    assert_eq!(dep_spec(&unrelated, "dependencies", "graphql-tools"), Some("^4.0.8"));
+}
+
+#[test]
 fn generic_override_rewrites_dependencies_spec() {
     let overrides = parsed(&[("foo", "1.0.0")]);
     let overrider = VersionsOverrider::new(&overrides, Path::new("/workspace"));

@@ -580,6 +580,45 @@ function isGetOptionsFromPnpmSettingsOptions (
   return value != null && ('expandRequestDestinationEnv' in value || 'manifest' in value || 'trustedSource' in value)
 }
 
+/**
+ * Yarn `resolutions` on the root manifest feed the same override map as
+ * `overrides`. Entries already present in `overrides` win.
+ */
+export function mergeResolutionsIntoOverrides (
+  overrides: Record<string, string> | undefined,
+  manifest: ProjectManifest | undefined
+): Record<string, string> | undefined {
+  const resolutions = readStringResolutions(manifest)
+  if (resolutions == null) return overrides
+  warnAboutDeprecatedVersionReferences(resolutions)
+  const replaced = manifest == null
+    ? resolutions
+    : mapValues(createVersionReferencesReplacer(manifest), resolutions)
+  if (overrides == null) return replaced
+  return {
+    ...replaced,
+    ...overrides,
+  }
+}
+
+function readStringResolutions (manifest: ProjectManifest | undefined): Record<string, string> | undefined {
+  if (manifest == null || !Object.hasOwn(manifest, 'resolutions')) return undefined
+  const resolutions: unknown = manifest.resolutions
+  if (resolutions == null || typeof resolutions !== 'object' || Array.isArray(resolutions)) {
+    throw new PnpmError('INVALID_OVERRIDES', `The resolutions field should be an object, but got ${renderReceivedType(resolutions)}`)
+  }
+  const entries = Object.entries(resolutions)
+  if (entries.length === 0) return undefined
+  const result: Record<string, string> = {}
+  for (const [selector, spec] of entries) {
+    if (typeof spec !== 'string') {
+      throw new PnpmError('INVALID_OVERRIDES', `The value of resolutions.${selector} should be a string, but got ${renderReceivedType(spec)}`)
+    }
+    result[selector] = spec
+  }
+  return result
+}
+
 function assertValidOverrides (overrides: unknown): asserts overrides is Record<string, string> {
   if (overrides == null || typeof overrides !== 'object' || Array.isArray(overrides)) {
     throw new PnpmError('INVALID_OVERRIDES', `The overrides field should be an object, but got ${renderReceivedType(overrides)}`)
