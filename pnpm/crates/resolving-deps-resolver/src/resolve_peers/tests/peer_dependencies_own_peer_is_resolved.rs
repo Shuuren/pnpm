@@ -295,8 +295,8 @@ fn peer_satisfied_by_an_ancestor_dependency_does_not_bubble_to_the_importer() {
             ("host@1.0.0".into(), package("host", "1.0.0", &[], false)),
         ]),
         dependencies_tree: HashMap::from_iter([
-            (local_peer.clone(), tree_node("peer@2.0.0", BTreeMap::new(), 1)),
-            (consumer.clone(), tree_node("consumer@1.0.0", BTreeMap::new(), 2)),
+            (local_peer, tree_node("peer@2.0.0", BTreeMap::new(), 1)),
+            (consumer, tree_node("consumer@1.0.0", BTreeMap::new(), 2)),
             (nested, tree_node("nested@1.0.0", nested_children, 1)),
             (host, tree_node("host@1.0.0", host_children, 0)),
         ]),
