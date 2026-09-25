@@ -20,7 +20,6 @@ fn overrides_map(entries: &[(&str, &str)]) -> IndexMap<String, String> {
 }
 
 #[test]
-#[test]
 fn resolutions_are_merged_under_overrides() {
     let root = root_with_manifest(&serde_json::json!({
         "name": "wiki",

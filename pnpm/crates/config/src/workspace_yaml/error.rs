@@ -197,7 +197,7 @@ pub enum LoadWorkspaceYamlError {
     InvalidResolutions,
 
     /// A `resolutions` entry is not a string specifier.
-    #[display(r#"The value of resolutions.{selector} should be a string, but got {received}"#)]
+    #[display(r"The value of resolutions.{selector} should be a string, but got {received}")]
     #[diagnostic(code(ERR_PNPM_INVALID_OVERRIDES))]
     InvalidResolutionsValue { selector: String, received: &'static str },
 
