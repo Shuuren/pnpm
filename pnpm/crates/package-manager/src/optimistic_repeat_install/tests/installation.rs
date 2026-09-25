@@ -208,6 +208,39 @@ fn returns_skipped_when_a_package_extension_injects_a_local_file_dependency() {
         "decision was {decision:?}",
     );
 }
+/// A package extension's local file dependency replaced by a generic
+/// override keeps the fast path: overrides rewrite extension-injected
+/// dependencies the same way they rewrite declared ones.
+#[test]
+fn returns_up_to_date_when_a_package_extension_local_dependency_is_replaced_by_an_override() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"^1.0.0"}"#,
+        |config| {
+            config.overrides = Some(IndexMap::from([("bar".to_string(), "^2.0.0".to_string())]));
+            config.package_extensions = Some(IndexMap::from([(
+                "foo@1".to_string(),
+                pnpm_config::PackageExtension {
+                    dependencies: Some(BTreeMap::from([(
+                        "bar".to_string(),
+                        "file:../bar".to_string(),
+                    )])),
+                    ..Default::default()
+                },
+            )]));
+        },
+    );
+
+    let decision = check(
+        dir.path(),
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        &[(dir.path().to_path_buf(), &manifest)],
+    );
+    assert_eq!(decision, Decision::UpToDate);
+}
 /// A local file dependency injected via a packageExtension's
 /// optionalDependencies does not bail when optionals are excluded from
 /// the install — they aren't installed, so their contents can't be stale.

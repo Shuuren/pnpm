@@ -107,6 +107,60 @@ fn returns_up_to_date_when_a_catalog_dependency_resolves_to_a_registry_range() {
     });
     assert_eq!(decision, Decision::UpToDate);
 }
+/// A `catalog:` dependency that dereferences to a local path but is
+/// replaced by a generic override keeps the fast path.
+#[test]
+fn returns_up_to_date_when_a_catalog_local_dependency_is_replaced_by_an_override() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"catalog:"}"#,
+        |config| {
+            config.overrides = Some(IndexMap::from([("foo".to_string(), "^2.0.0".to_string())]));
+        },
+    );
+
+    let catalogs: Catalogs = BTreeMap::from([(
+        "default".to_string(),
+        BTreeMap::from([("foo".to_string(), "../foo".to_string())]),
+    )]);
+    let settings = current_settings_with_catalogs(
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        isolated_included(),
+        None,
+        &catalogs,
+    );
+    let mut projects = BTreeMap::new();
+    projects.insert(
+        dir.path()
+            .to_string_lossy()
+            .into_owned(),
+        ProjectEntry { name: Some("root".into()), version: Some("1.0.0".into()) },
+    );
+    const WHOLE_SECOND_MS: i64 = 1_700_000_000_000;
+    set_mtime_ms(&dir.path().join(Lockfile::FILE_NAME), WHOLE_SECOND_MS);
+    set_mtime_ms(manifest.path(), WHOLE_SECOND_MS);
+    set_mtime_ms(&config.modules_dir.join(WORKSPACE_STATE_FILENAME), WHOLE_SECOND_MS);
+    write_state(dir.path(), backdate_validated_files(dir.path()), settings, projects);
+
+    let decision = check_optimistic_repeat_install(&OptimisticRepeatInstallCheck {
+        workspace_root: dir.path(),
+        config,
+        project_manifests: &[(dir.path().to_path_buf(), &manifest)],
+        is_workspace_install: false,
+        lockfile: MaybeLazyLockfile::Loaded(None),
+        catalogs: &catalogs,
+        layout: crate::RepeatInstallLayout {
+            node_linker: pnpm_config::NodeLinker::Isolated,
+            included: isolated_included(),
+            supported_architectures: None,
+        },
+        manifest_freshness: crate::ManifestFreshness::Mtime,
+    });
+    assert_eq!(decision, Decision::UpToDate);
+}
 /// A `pnpm.overrides` entry spelled `catalog:` whose catalog entry
 /// holds a local path bails like a direct local file override —
 /// overrides are dereferenced through `parse_config_overrides` before

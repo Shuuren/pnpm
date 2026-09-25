@@ -9,6 +9,7 @@ use super::{
     CatalogAnchor, CatalogResolutionResult, Catalogs, DependencyGroup, Lockfile,
     OptimisticRepeatInstallCheck, Path, PathBuf, WantedDependency, resolve_from_catalog,
 };
+use pnpm_config_parse_overrides::VersionOverride;
 use pnpm_lockfile::{LockfileResolution, PkgName, is_local_tarball_path};
 use pnpm_resolving_local_resolver::local_tarball_path;
 use pnpm_workspace::importer_id_from_root_dir;
@@ -86,8 +87,9 @@ pub(crate) fn frozen_local_tarballs_to_verify(
 /// `catalog:` specs are dereferenced through the workspace catalogs.
 pub(crate) fn has_local_file_dep_requiring_install(
     check: &OptimisticRepeatInstallCheck<'_>,
+    overrides: &[VersionOverride],
 ) -> Result<bool, &'static str> {
-    let tarballs = match scan_local_tarball_deps(check) {
+    let tarballs = match scan_local_tarball_deps(check, overrides) {
         LocalTarballScan::RequiresInstall => return Ok(true),
         LocalTarballScan::Candidates(tarballs) => tarballs,
     };
@@ -124,7 +126,10 @@ enum LocalTarballScan {
     Candidates(Vec<LocalTarballDependency>),
 }
 
-fn scan_local_tarball_deps(check: &OptimisticRepeatInstallCheck<'_>) -> LocalTarballScan {
+fn scan_local_tarball_deps(
+    check: &OptimisticRepeatInstallCheck<'_>,
+    overrides: &[VersionOverride],
+) -> LocalTarballScan {
     let fields: [(&str, DependencyGroup, bool); 3] = [
         ("dependencies", DependencyGroup::Prod, check.layout.included.dependencies),
         ("devDependencies", DependencyGroup::Dev, check.layout.included.dev_dependencies),
@@ -143,6 +148,7 @@ fn scan_local_tarball_deps(check: &OptimisticRepeatInstallCheck<'_>) -> LocalTar
     for (project_dir, manifest) in check.project_manifests {
         if !scan_project_manifest_tarballs(
             check,
+            overrides,
             &workspace_packages,
             project_dir,
             manifest,
@@ -157,6 +163,7 @@ fn scan_local_tarball_deps(check: &OptimisticRepeatInstallCheck<'_>) -> LocalTar
 
 fn scan_project_manifest_tarballs(
     check: &OptimisticRepeatInstallCheck<'_>,
+    overrides: &[VersionOverride],
     workspace_packages: &workspace::WorkspacePackageMap<'_>,
     project_dir: &Path,
     manifest: &pnpm_package_manifest::PackageManifest,
@@ -169,6 +176,7 @@ fn scan_project_manifest_tarballs(
         }
         let scan = FieldTarballScan {
             catalogs: check.catalogs,
+            overrides,
             workspace_dir: check.config.workspace_dir.as_deref(),
             project_dir,
             field,
@@ -186,6 +194,7 @@ fn scan_project_manifest_tarballs(
 /// One manifest field of one project, as the tarball scan reads it.
 struct FieldTarballScan<'a> {
     catalogs: &'a Catalogs,
+    overrides: &'a [VersionOverride],
     /// Where `pnpm-workspace.yaml` sits, so a `file:` catalog entry's
     /// relative path is measured from the same directory the install
     /// measures it from.
@@ -256,6 +265,12 @@ fn local_tarball_candidate(
     spec: &serde_json::Value,
 ) -> LocalTarballCandidate {
     let Some(spec) = spec.as_str() else { return LocalTarballCandidate::Skip };
+    // The override's target is what gets installed. A local override target
+    // is reported by `has_local_file_override`, so this scan can skip the
+    // declared spec.
+    if specs::generic_override_replaces(scan.overrides, alias, spec) {
+        return LocalTarballCandidate::Skip;
+    }
     let resolved_spec = resolve_catalog_spec(scan, alias, spec);
     let Some(spec) = resolved_spec.as_deref() else { return LocalTarballCandidate::Skip };
     if !is_local_file_spec(spec) {

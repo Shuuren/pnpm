@@ -26,8 +26,11 @@
 //! mtime check), and the local-file-dependency bail: mutable directory
 //! dependencies always take the full install path. Local tarballs stay on the
 //! fast path only when their bytes match the integrity in the lockfile.
-//! Local specs introduced through `pnpm.overrides` or package extensions
-//! remain on the full path because their resolution base is graph-dependent.
+//! A generic `pnpm.overrides` entry that replaces a declared local spec
+//! keeps that dependency on the fast path, because the override's target
+//! is what gets installed. Local specs introduced through an override
+//! target or a package extension remain on the full path because their
+//! resolution base is graph-dependent.
 //! A direct dependency whose link in its project's modules directory points
 //! to a missing target also takes the full path, which relinks it; nothing
 //! the timestamps cover moves when a link is broken outside pnpm.
@@ -384,7 +387,16 @@ fn local_file_blocks_fast_path(check: &OptimisticRepeatInstallCheck<'_>) -> Opti
         layout: crate::RepeatInstallLayout { included, .. },
         ..
     } = check;
-    match has_local_file_dep_requiring_install(check) {
+    // Parsed once so a bad override set reports the parse error even when a
+    // local file dependency is also declared.
+    let parsed_overrides = match crate::install::parse_config_overrides(config, catalogs) {
+        Ok(overrides) => overrides,
+        Err(_) => return Some("pnpm.overrides cannot be parsed"),
+    };
+    let overrides = parsed_overrides
+        .as_deref()
+        .unwrap_or(&[]);
+    match has_local_file_dep_requiring_install(check, overrides) {
         Ok(true) => {
             return Some(
                 "a dependency is a local file dependency and its contents may have changed",
@@ -393,16 +405,12 @@ fn local_file_blocks_fast_path(check: &OptimisticRepeatInstallCheck<'_>) -> Opti
         Ok(false) => {}
         Err(reason) => return Some(reason),
     }
-    match has_local_file_override(config, catalogs) {
-        Ok(true) => {
-            return Some(
-                "an override maps to a local file dependency and its contents may have changed",
-            );
-        }
-        Err(reason) => return Some(reason),
-        Ok(false) => {}
+    if has_local_file_override(overrides) {
+        return Some(
+            "an override maps to a local file dependency and its contents may have changed",
+        );
     }
-    if has_local_file_package_extension(config, included, catalogs) {
+    if has_local_file_package_extension(config, included, catalogs, overrides) {
         return Some(
             "a package extension injects a local file dependency and its contents may have changed",
         );

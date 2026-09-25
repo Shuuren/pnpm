@@ -68,6 +68,107 @@ fn returns_up_to_date_when_overrides_are_not_local_paths() {
     );
     assert_eq!(decision, Decision::UpToDate);
 }
+/// A declared `file:` dependency replaced by a generic registry override
+/// keeps the fast path: the override's target is what gets installed
+/// (<https://github.com/pnpm/pnpm/issues/12892>).
+#[test]
+fn returns_up_to_date_when_a_local_file_dependency_is_replaced_by_a_registry_override() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"file:../foo"}"#,
+        |config| {
+            config.overrides = Some(IndexMap::from([("foo".to_string(), "^2.0.0".to_string())]));
+        },
+    );
+
+    let decision = check(
+        dir.path(),
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        &[(dir.path().to_path_buf(), &manifest)],
+    );
+    assert_eq!(decision, Decision::UpToDate);
+}
+/// A `file:` dependency overridden to another local file still takes the
+/// full path, through the override reason.
+#[test]
+fn returns_skipped_when_a_local_file_dependency_is_overridden_to_another_local_file() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"file:../foo"}"#,
+        |config| {
+            config.overrides =
+                Some(IndexMap::from([("foo".to_string(), "file:../bar".to_string())]));
+        },
+    );
+
+    let decision = check(
+        dir.path(),
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        &[(dir.path().to_path_buf(), &manifest)],
+    );
+    assert!(
+        matches!(decision, Decision::Skipped { reason } if reason.contains("override")),
+        "decision was {decision:?}",
+    );
+}
+/// A parent-scoped override may not apply to the package that declares
+/// the dependency, so it does not suppress the local-file bail.
+#[test]
+fn returns_skipped_when_a_local_file_dependency_is_matched_only_by_a_parent_scoped_override() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"file:../foo"}"#,
+        |config| {
+            config.overrides =
+                Some(IndexMap::from([("bar>foo".to_string(), "^2.0.0".to_string())]));
+        },
+    );
+
+    let decision = check(
+        dir.path(),
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        &[(dir.path().to_path_buf(), &manifest)],
+    );
+    assert!(
+        matches!(decision, Decision::Skipped { reason } if reason.contains("local file dependency")),
+        "decision was {decision:?}",
+    );
+}
+/// A convergence override (`pkg@`) rewrites an edge only when its
+/// declared spec is a plain semver range, so it never replaces a
+/// `file:` dependency.
+#[test]
+fn returns_skipped_when_a_local_file_dependency_is_matched_only_by_a_convergence_override() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"file:../foo"}"#,
+        |config| {
+            config.overrides = Some(IndexMap::from([("foo@".to_string(), "2.0.0".to_string())]));
+        },
+    );
+
+    let decision = check(
+        dir.path(),
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        &[(dir.path().to_path_buf(), &manifest)],
+    );
+    assert!(
+        matches!(decision, Decision::Skipped { reason } if reason.contains("local file dependency")),
+        "decision was {decision:?}",
+    );
+}
 /// An unparsable `pnpm.overrides` (here a `catalog:` reference with no
 /// matching catalog entry) bails to the full install with the
 /// parse-error reason, not the local-file reason: the cause is a

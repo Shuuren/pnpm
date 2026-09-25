@@ -2,6 +2,7 @@ use crate::optimistic_repeat_install::{
     CatalogAnchor, CatalogResolutionResult, Catalogs, Config, IncludedDependencies,
     WantedDependency, resolve_from_catalog,
 };
+use pnpm_config_parse_overrides::VersionOverride;
 use pnpm_lockfile::is_local_tarball_path;
 
 /// Whether a `catalog:` spec dereferences (through the workspace
@@ -27,23 +28,35 @@ pub(crate) fn catalog_resolves_to_local_file(catalogs: &Catalogs, alias: &str, s
     }
 }
 
+/// Whether a generic (parentless, non-convergence) override replaces this
+/// declared dependency. The override's target is what gets installed.
+/// Parent-scoped overrides (`parent>dep`) do not count: whether they apply
+/// depends on the parent package. Convergence overrides (`pkg@`) do not
+/// count either: they rewrite an edge only when its declared spec is a
+/// plain semver range the override version satisfies.
+pub(super) fn generic_override_replaces(
+    overrides: &[VersionOverride],
+    alias: &str,
+    spec: &str,
+) -> bool {
+    overrides
+        .iter()
+        .any(|entry| {
+            !entry.converge
+                && entry.parent_pkg.is_none()
+                && crate::overrides::matches_target(&entry.target_pkg, alias, spec)
+        })
+}
+
 /// Whether any `pnpm.overrides` entry maps to a local file specifier.
 /// An override redirects every matching dependency in the graph to its
 /// specifier, so a local file override makes the installed contents
 /// depend on that directory or tarball the same way a direct local file
-/// dependency does. A parse failure returns its own distinct reason —
-/// not the local-file reason, which would misattribute the cause.
-pub(crate) fn has_local_file_override(
-    config: &Config,
-    catalogs: &Catalogs,
-) -> Result<bool, &'static str> {
-    match crate::install::parse_config_overrides(config, catalogs) {
-        Ok(Some(overrides)) => {
-            Ok(overrides.iter().any(|entry| is_local_file_spec(&entry.new_bare_specifier)))
-        }
-        Ok(None) => Ok(false),
-        Err(_) => Err("pnpm.overrides cannot be parsed"),
-    }
+/// dependency does. The overrides come from
+/// [`crate::install::parse_config_overrides`], so `catalog:` specs are
+/// already dereferenced.
+pub(crate) fn has_local_file_override(overrides: &[VersionOverride]) -> bool {
+    overrides.iter().any(|entry| is_local_file_spec(&entry.new_bare_specifier))
 }
 
 /// Whether any `packageExtensions` entry injects a dependency with a
@@ -59,6 +72,7 @@ pub(crate) fn has_local_file_package_extension(
     config: &Config,
     included: IncludedDependencies,
     catalogs: &Catalogs,
+    overrides: &[VersionOverride],
 ) -> bool {
     let Some(extensions) = config.package_extensions.as_ref() else {
         return false;
@@ -75,8 +89,9 @@ pub(crate) fn has_local_file_package_extension(
                 .any(|deps| {
                     deps.iter()
                         .any(|(alias, spec)| {
-                            is_local_file_spec(spec)
-                                || catalog_resolves_to_local_file(catalogs, alias, spec)
+                            !generic_override_replaces(overrides, alias, spec)
+                                && (is_local_file_spec(spec)
+                                    || catalog_resolves_to_local_file(catalogs, alias, spec))
                         })
                 })
         })
