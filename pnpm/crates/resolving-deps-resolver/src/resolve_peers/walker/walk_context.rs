@@ -12,8 +12,10 @@ pub(in super::super) struct NodeOutput {
     /// Excludes peers resolved against this node's own children (those
     /// are absorbed into the children's depPaths).
     pub(in super::super) external_resolved_peers: Arc<HashMap<String, NodeId>>,
-    /// Real `peerDependencies` resolved anywhere in this node's
-    /// subtree. This feeds the auto-install-peers loop.
+    /// Peer providers resolved in this subtree that this node does not
+    /// itself install, plus this node's own resolved peers. A provider
+    /// this node installs stays off the set: hoisting that copy onto an
+    /// importer would override a workspace-root provider of the same name.
     pub(in super::super) auto_install_resolved_peers: HashMap<String, NodeId>,
     pub(in super::super) missing_peers: Arc<HashMap<String, MissingPeerInfo>>,
     /// [`ResolvePeersResult::missing_names_by_pkg`](crate::ResolvePeersResult::missing_names_by_pkg)'s per-subtree

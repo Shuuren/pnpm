@@ -264,6 +264,65 @@ fn resolved_peer_providers_from_direct_outputs_are_last_write_wins() {
     assert_eq!(result.resolved_peer_providers_by_alias.get("peer"), Some(&second_peer));
 }
 
+/// A nested dependency that satisfies a descendant's peer stays under that
+/// dependency. Hoisting the same node onto the importer would replace a
+/// workspace-root provider of the peer name, and the next dedupe would
+/// put the root provider back.
+#[test]
+fn peer_satisfied_by_an_ancestor_dependency_does_not_bubble_to_the_importer() {
+    let local_peer = NodeId::leaf("peer@2.0.0");
+    let consumer = NodeId::next();
+    let nested = NodeId::next();
+    let host = NodeId::next();
+
+    let mut nested_children = BTreeMap::new();
+    nested_children.insert("consumer".to_string(), consumer.clone());
+
+    let mut host_children = BTreeMap::new();
+    host_children.insert("peer".to_string(), local_peer.clone());
+    host_children.insert("nested".to_string(), nested.clone());
+
+    let mut tree = ResolvedTree {
+        direct: vec![DirectDep {
+            alias: "host".to_string(),
+            node_id: host.clone(),
+            id: "host@1.0.0".to_string(),
+        }],
+        packages: HashMap::from_iter([
+            ("peer@2.0.0".into(), package("peer", "2.0.0", &[], true)),
+            ("consumer@1.0.0".into(), package("consumer", "1.0.0", &[("peer", "*")], true)),
+            ("nested@1.0.0".into(), package("nested", "1.0.0", &[], false)),
+            ("host@1.0.0".into(), package("host", "1.0.0", &[], false)),
+        ]),
+        dependencies_tree: HashMap::from_iter([
+            (local_peer.clone(), tree_node("peer@2.0.0", BTreeMap::new(), 1)),
+            (consumer.clone(), tree_node("consumer@1.0.0", BTreeMap::new(), 2)),
+            (nested, tree_node("nested@1.0.0", nested_children, 1)),
+            (host, tree_node("host@1.0.0", host_children, 0)),
+        ]),
+        all_peer_dep_names: HashSet::from_iter(["peer".to_string()]),
+        policy_violations: Vec::new(),
+        applied_patches: HashSet::default(),
+        children_by_id: HashMap::default(),
+    };
+
+    let result = resolve_peers(&mut tree, ResolvePeersOptions::default());
+
+    assert!(
+        !result.resolved_peer_providers_by_alias.contains_key("peer"),
+        "the nested peer provider must not be hoisted: {:?}",
+        result.resolved_peer_providers_by_alias,
+    );
+    let consumer_path = result.graph
+        .keys()
+        .find(|path| path.as_str().starts_with("consumer@1.0.0"))
+        .expect("consumer is in the graph");
+    assert!(
+        consumer_path.as_str().contains("peer@2.0.0"),
+        "the consumer still resolves against the ancestor dependency: {consumer_path}",
+    );
+}
+
 #[test]
 fn peer_name_cycle_collapses_provider_suffixes() {
     let loader = NodeId::next();

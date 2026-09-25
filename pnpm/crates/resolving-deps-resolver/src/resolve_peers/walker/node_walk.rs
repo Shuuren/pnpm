@@ -162,6 +162,15 @@ impl Walker<'_> {
             external_from_children: std::mem::take(&mut walked.outputs.external_peers),
             missing_from_children: &walked.outputs.missing_peers,
         });
+        // Descendants' providers stop at the node that installs them.
+        // This node's own peers are folded in afterwards and still bubble one level.
+        walked.outputs.auto_install_resolved_peers.retain(|peer_alias, _| {
+            !super::peer_is_provided_by_node(
+                peer_alias,
+                &walked.children_map,
+                walked.discovery_children.as_ref(),
+            )
+        });
         walked.outputs.auto_install_resolved_peers.extend(
             peers.own_resolved
                 .iter()

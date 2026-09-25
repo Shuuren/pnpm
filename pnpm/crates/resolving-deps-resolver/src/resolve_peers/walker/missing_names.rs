@@ -12,15 +12,28 @@ pub(super) fn external_peers_to_report(
     all_resolved_peers
         .iter()
         .filter(|(peer_alias, _)| {
-            !children_map.contains_key(peer_alias.as_str())
-                && discovery_children.is_none_or(|(children, _)| {
-                    !children
-                        .iter()
-                        .any(|edge| edge.alias == **peer_alias)
-                })
+            !peer_is_provided_by_node(peer_alias, children_map, discovery_children)
         })
         .map(|(peer_alias, peer_node_id)| (peer_alias.clone(), peer_node_id.clone()))
         .collect()
+}
+
+/// Whether this node installs `peer_alias`. A descendant that resolved the
+/// peer against that child must not report the provider any further up.
+/// Hoisting it would make the nested copy the provider for the whole
+/// importer, including packages the workspace root already satisfies with
+/// a different resolution of the same name.
+pub(super) fn peer_is_provided_by_node(
+    peer_alias: &str,
+    children_map: &BTreeMap<String, NodeId>,
+    discovery_children: Option<&(Arc<Vec<ChildEdge>>, AncestorIds)>,
+) -> bool {
+    children_map.contains_key(peer_alias)
+        || discovery_children.is_some_and(|(children, _)| {
+            children
+                .iter()
+                .any(|edge| edge.alias == peer_alias)
+        })
 }
 
 /// The missing-peer names reported for one package by a walk. A

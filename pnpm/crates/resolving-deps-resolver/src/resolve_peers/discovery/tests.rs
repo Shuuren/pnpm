@@ -69,14 +69,20 @@ fn cached_subtree_reuse_reports_no_peer_providers() {
         ResolvePeersOptions::default(),
     );
     assert!(
-        first.resolved_peer_providers_by_alias.contains_key("peerpkg"),
-        "the walk that resolves the subtree reports its providers",
+        first.resolved_peer_providers_by_alias.contains_key("peerx"),
+        "a peer resolved above this subtree is still reported for auto-install: {:?}",
+        first.resolved_peer_providers_by_alias,
+    );
+    assert!(
+        !first.resolved_peer_providers_by_alias.contains_key("peerpkg"),
+        "a peer mid already installs must not be hoisted above mid: {:?}",
+        first.resolved_peer_providers_by_alias,
     );
 
     let (second, _) =
         discover_peers(&mut tree, &direct, &direct, caches, ResolvePeersOptions::default());
     assert_eq!(
-        second.resolved_peer_providers_by_alias.get("peerpkg"),
+        second.resolved_peer_providers_by_alias.get("peerx"),
         None,
         "a cached-subtree reuse must not re-report the owner walk's providers",
     );

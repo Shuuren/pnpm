@@ -19,7 +19,7 @@ use walk_context::{
 };
 
 mod missing_names;
-use missing_names::{children_scc_ids, external_peers_to_report};
+use missing_names::{children_scc_ids, external_peers_to_report, peer_is_provided_by_node};
 
 mod peer_issues;
 
