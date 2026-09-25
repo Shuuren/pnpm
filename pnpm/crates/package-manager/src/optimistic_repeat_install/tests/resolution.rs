@@ -139,7 +139,33 @@ fn returns_skipped_when_a_local_file_dependency_is_matched_only_by_a_parent_scop
         &[(dir.path().to_path_buf(), &manifest)],
     );
     assert!(
-        matches!(decision, Decision::Skipped { reason } if reason.contains("local file dependency")),
+        matches!(decision, Decision::Skipped { reason } if reason.starts_with("a dependency is a local file dependency")),
+        "decision was {decision:?}",
+    );
+}
+/// A version-constrained override selector does not intersect a `file:`
+/// spec, so the dependency is not replaced.
+#[test]
+fn returns_skipped_when_the_override_matching_a_local_file_dependency_has_a_version_constraint() {
+    let (dir, config, manifest) = setup_fresh_install_with_config(
+        pnpm_config::NodeLinker::Isolated,
+        "root",
+        "1.0.0",
+        r#""dependencies":{"foo":"file:../foo"}"#,
+        |config| {
+            config.overrides =
+                Some(IndexMap::from([("foo@^2.0.0".to_string(), "^2.0.0".to_string())]));
+        },
+    );
+
+    let decision = check(
+        dir.path(),
+        config,
+        pnpm_config::NodeLinker::Isolated,
+        &[(dir.path().to_path_buf(), &manifest)],
+    );
+    assert!(
+        matches!(decision, Decision::Skipped { reason } if reason.starts_with("a dependency is a local file dependency")),
         "decision was {decision:?}",
     );
 }
@@ -165,7 +191,7 @@ fn returns_skipped_when_a_local_file_dependency_is_matched_only_by_a_convergence
         &[(dir.path().to_path_buf(), &manifest)],
     );
     assert!(
-        matches!(decision, Decision::Skipped { reason } if reason.contains("local file dependency")),
+        matches!(decision, Decision::Skipped { reason } if reason.starts_with("a dependency is a local file dependency")),
         "decision was {decision:?}",
     );
 }

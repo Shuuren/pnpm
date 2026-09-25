@@ -4,7 +4,7 @@ import util from 'node:util'
 
 import { resolveFromCatalog } from '@pnpm/catalogs.resolver'
 import type { Catalogs } from '@pnpm/catalogs.types'
-import { type VersionOverride, isIntersectingRange, parseOverrides } from '@pnpm/config.parse-overrides'
+import { isIntersectingRange, parseOverrides, type VersionOverride } from '@pnpm/config.parse-overrides'
 import { type Config, type ConfigContext, createProjectModulesDirResolver } from '@pnpm/config.reader'
 import { MANIFEST_BASE_NAMES } from '@pnpm/constants'
 import { hashObjectNullableWithPrefix } from '@pnpm/crypto.object-hasher'

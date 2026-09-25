@@ -389,9 +389,8 @@ fn local_file_blocks_fast_path(check: &OptimisticRepeatInstallCheck<'_>) -> Opti
     } = check;
     // Parsed once so a bad override set reports the parse error even when a
     // local file dependency is also declared.
-    let parsed_overrides = match crate::install::parse_config_overrides(config, catalogs) {
-        Ok(overrides) => overrides,
-        Err(_) => return Some("pnpm.overrides cannot be parsed"),
+    let Ok(parsed_overrides) = crate::install::parse_config_overrides(config, catalogs) else {
+        return Some("pnpm.overrides cannot be parsed");
     };
     let overrides = parsed_overrides
         .as_deref()

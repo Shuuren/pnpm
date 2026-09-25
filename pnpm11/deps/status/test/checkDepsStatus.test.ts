@@ -1795,6 +1795,26 @@ describe('checkDepsStatus - treatLocalFileDepsAsOutdated', () => {
     expect(result.issue).toBe('The dependency "foo" is a local file dependency and its contents may have changed')
   })
 
+  it('returns upToDate: false when the override matching a file: dependency has a version constraint', async () => {
+    const lastValidatedTimestamp = Date.now() - 10_000
+    jest.mocked(loadWorkspaceState).mockReturnValue(mockWorkspaceState(lastValidatedTimestamp))
+
+    const opts: CheckDepsStatusOptions = {
+      rootProjectManifest: {
+        dependencies: { foo: 'file:../foo' },
+      },
+      rootProjectManifestDir: '/project',
+      overrides: { 'foo@^2.0.0': '^2.0.0' },
+      pnpmfile: [],
+      treatLocalFileDepsAsOutdated: true,
+      ...mockWorkspaceState(lastValidatedTimestamp).settings,
+    }
+    const result = await checkDepsStatus(opts)
+
+    expect(result.upToDate).toBe(false)
+    expect(result.issue).toBe('The dependency "foo" is a local file dependency and its contents may have changed')
+  })
+
   it('returns upToDate: false when a file: dependency is matched only by a convergence override', async () => {
     const lastValidatedTimestamp = Date.now() - 10_000
     jest.mocked(loadWorkspaceState).mockReturnValue(mockWorkspaceState(lastValidatedTimestamp))
