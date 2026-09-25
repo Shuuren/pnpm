@@ -610,8 +610,6 @@ export async function getConfig (opts: {
         }
       }
     }
-
-    pnpmConfig.overrides = mergeResolutionsIntoOverrides(pnpmConfig.overrides, pnpmConfig.rootProjectManifest)
   }
 
   // Precedence: builtin < `_auth` file < .npmrc < yaml < `_auth` env < CLI. CLI
@@ -745,6 +743,12 @@ export async function getConfig (opts: {
   if (virtualStoreTypeFromEnv != null) {
     pnpmConfig.enableGlobalVirtualStore = virtualStoreTypeFromEnv === 'global'
     explicitlySetKeys.add('enableGlobalVirtualStore')
+  }
+
+  // After the env loop so `PNPM_CONFIG_OVERRIDES` is already on the map.
+  // Keys from yaml or the environment win; resolutions fill the rest.
+  if (!opts.ignoreLocalSettings) {
+    pnpmConfig.overrides = mergeResolutionsIntoOverrides(pnpmConfig.overrides, pnpmConfig.rootProjectManifest)
   }
 
   // After the env loop: PNPM_CONFIG_REGISTRY can still change
