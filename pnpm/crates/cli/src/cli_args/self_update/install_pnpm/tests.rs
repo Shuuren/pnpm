@@ -1,3 +1,4 @@
+use super::native_binary::{launcher_temp_path, node_executable, node_launcher_script};
 #[cfg(unix)]
 use super::{InstallPnpmResult, reuse_global_engine};
 use super::{
@@ -572,4 +573,200 @@ fn reuse_cached_engine_rejects_a_wrapper_that_escapes_the_slot() {
     // The recorded version matches, but the wrapper resolves outside the
     // slot, so the slot is not reusable.
     assert!(!reuse_cached_engine(temp.path(), pnpm_package_to_install("11.10.0"), "11.10.0"));
+}
+
+/// Alpine arm64 loads neither published native build. The glibc binary's
+/// interpreter is missing, and the musl arm64 build needs `libc.so`.
+/// The wrapper then runs `dist/pnpm.mjs` with Node.js.
+#[cfg(unix)]
+#[test]
+fn uses_the_javascript_build_when_no_native_binary_can_load() {
+    assert!(which::which("node").is_ok(), "node is on PATH");
+    let temp = tempfile::tempdir().expect("tempdir");
+    let platform_dir = exe_platform_pkg_dir_name_next(host_platform(), host_arch(), host_libc());
+    write_platform_binary(temp.path(), PNPM_EXE_PACKAGE_NAME, &platform_dir, &unloadable_elf());
+    let wrapper = package_dir(temp.path(), PNPM_EXE_PACKAGE_NAME);
+    fs::create_dir_all(wrapper.join("dist")).expect("create dist");
+    fs::write(
+        wrapper.join("dist").join("pnpm.mjs"),
+        "import { writeSync } from 'node:fs'\nwriteSync(1, 'from-js\\n')\n",
+    )
+    .expect("write js build");
+
+    link_exe_platform_binary(temp.path(), PNPM_EXE_PACKAGE_NAME).expect("link");
+    link_exe_platform_binary(temp.path(), PNPM_EXE_PACKAGE_NAME).expect("relink");
+
+    let linked = fs::read_to_string(wrapper.join("pnpm")).expect("read launcher");
+    let node = node_executable(std::env::var_os("PATH").as_deref()).expect("node");
+    let quoted = pnpm_cmd_shim::sh_single_quote(node.to_str().expect("utf8 node"));
+    assert!(linked.starts_with("#!/bin/sh\n"), "{linked}");
+    assert!(linked.contains("/dist/pnpm.mjs"), "{linked}");
+    assert!(linked.contains(&format!("exec {quoted} ")), "{linked}");
+    assert!(
+        fs::read_dir(&wrapper)
+            .expect("read wrapper")
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pnpm-js-launcher.")),
+        "the launcher temp file is removed after rename"
+    );
+    let platform_path = temp
+        .path()
+        .join("node_modules")
+        .join("@pnpm")
+        .join(&platform_dir);
+    assert!(
+        fs::read_dir(&platform_path)
+            .expect("read platform dir")
+            .flatten()
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pnpm-bin-probe.")),
+        "the execution probe is removed"
+    );
+
+    let bin_dir = temp.path().join("bin");
+    fs::create_dir(&bin_dir).expect("create bin");
+    std::os::unix::fs::symlink("../node_modules/@pnpm/exe/pnpm", bin_dir.join("pnpm"))
+        .expect("symlink bin");
+    let output = std::process::Command::new(bin_dir.join("pnpm")).output().expect("run launcher");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(output.stdout, b"from-js\n");
+}
+
+/// A v12 package has no JavaScript twin. An unloadable native binary is
+/// still what gets linked, so the failure stays visible.
+#[cfg(unix)]
+#[test]
+fn links_an_unloadable_binary_when_the_javascript_build_is_absent() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let platform_dir = exe_platform_pkg_dir_name_next(host_platform(), host_arch(), host_libc());
+    let elf = unloadable_elf();
+    write_platform_binary(temp.path(), PNPM_PACKAGE_NAME, &platform_dir, &elf);
+
+    link_exe_platform_binary(temp.path(), PNPM_PACKAGE_NAME).expect("link");
+
+    let linked = fs::read(package_dir(temp.path(), PNPM_PACKAGE_NAME).join("pnpm"))
+        .expect("read linked binary");
+    assert!(linked.starts_with(b"\x7fELF"), "the native binary is linked when no JS build exists");
+}
+
+/// On Linux the other libc's package is a candidate. A runnable sibling is
+/// linked even when the preferred binary cannot be loaded.
+#[cfg(target_os = "linux")]
+#[test]
+fn prefers_a_runnable_libc_sibling_over_an_unloadable_binary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let platform = host_platform();
+    let arch = host_arch();
+    let libc = host_libc();
+    let primary = exe_platform_pkg_dir_name(platform, arch, libc);
+    let alternate_libc = if libc == "musl" { "" } else { "musl" };
+    let alternate = exe_platform_pkg_dir_name(platform, arch, alternate_libc);
+    write_platform_binary(temp.path(), PNPM_EXE_PACKAGE_NAME, &primary, &unloadable_elf());
+    let script = b"#!/bin/sh\necho runnable-sibling\n";
+    write_platform_binary(temp.path(), PNPM_EXE_PACKAGE_NAME, &alternate, script);
+    let wrapper = package_dir(temp.path(), PNPM_EXE_PACKAGE_NAME);
+    fs::create_dir_all(wrapper.join("dist")).expect("create dist");
+    fs::write(wrapper.join("dist").join("pnpm.mjs"), "export {}\n").expect("write js build");
+
+    link_exe_platform_binary(temp.path(), PNPM_EXE_PACKAGE_NAME).expect("link");
+
+    assert_eq!(fs::read(wrapper.join("pnpm")).expect("read linked binary"), script);
+}
+
+#[test]
+fn launcher_temp_paths_do_not_collide() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let first = launcher_temp_path(temp.path());
+    let second = launcher_temp_path(temp.path());
+    assert_ne!(first, second);
+}
+
+#[test]
+fn node_executable_requires_an_absolute_executable_file() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    assert!(node_executable(None).is_none());
+    assert!(node_executable(Some(std::ffi::OsStr::new(""))).is_none());
+    assert!(node_executable(Some(temp.path().as_os_str())).is_none());
+
+    let dir_named_node = temp.path().join("node");
+    fs::create_dir(&dir_named_node).expect("directory named node");
+    assert!(node_executable(Some(temp.path().as_os_str())).is_none());
+    fs::remove_dir(&dir_named_node).expect("remove directory");
+
+    let node = temp.path().join("node");
+    fs::write(&node, "#!/bin/sh\n").expect("write node");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o644)).expect("chmod");
+        assert!(node_executable(Some(temp.path().as_os_str())).is_none());
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).expect("chmod executable");
+        let found = node_executable(Some(temp.path().as_os_str())).expect("executable node");
+        assert_eq!(found, node);
+    }
+}
+
+#[test]
+fn the_javascript_launcher_quotes_the_node_path() {
+    let script =
+        node_launcher_script(std::path::Path::new("/opt/node's/bin/node")).expect("script");
+    assert!(script.contains("exec '/opt/node'\\''s/bin/node' "), "{script}");
+    assert!(!script.contains("exec /opt/node's/bin/node"), "{script}");
+    assert!(node_launcher_script(std::path::Path::new("/opt/node\n/bin/node")).is_none());
+    assert!(node_launcher_script(std::path::Path::new("/opt/node\r/bin/node")).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn node_executable_skips_a_path_containing_a_newline() {
+    let parent = tempfile::tempdir().expect("tempdir");
+    let dir = parent.path().join("a\nb");
+    fs::create_dir(&dir).expect("dir with a newline");
+    let node = dir.join("node");
+    fs::write(&node, "#!/bin/sh\n").expect("write node");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    assert!(node_executable(Some(dir.as_os_str())).is_none());
+}
+
+#[cfg(unix)]
+fn write_platform_binary(
+    install_dir: &std::path::Path,
+    wrapper_pkg_name: &str,
+    platform_dir: &str,
+    bytes: &[u8],
+) {
+    fake_engine_install_for(install_dir, wrapper_pkg_name, false);
+    let src_dir = install_dir
+        .join("node_modules")
+        .join("@pnpm")
+        .join(platform_dir);
+    fs::create_dir_all(&src_dir).expect("create platform dir");
+    fs::write(src_dir.join("pnpm"), bytes).expect("write platform binary");
+}
+
+#[cfg(unix)]
+fn unloadable_elf() -> Vec<u8> {
+    let interp = b"/no/such/pnpm-ld-10443.so\0";
+    let interp_off = 64 + 56;
+    let mut elf = vec![0_u8; interp_off + interp.len()];
+    elf[0..4].copy_from_slice(&[0x7f, b'E', b'L', b'F']);
+    elf[4] = 2;
+    elf[5] = 1;
+    elf[18..20].copy_from_slice(&0xffff_u16.to_le_bytes());
+    elf[32..40].copy_from_slice(&64_u64.to_le_bytes());
+    elf[54..56].copy_from_slice(&56_u16.to_le_bytes());
+    elf[56..58].copy_from_slice(&1_u16.to_le_bytes());
+    elf[64..68].copy_from_slice(&3_u32.to_le_bytes());
+    elf[72..80].copy_from_slice(&u64::try_from(interp_off).unwrap().to_le_bytes());
+    elf[96..104].copy_from_slice(&u64::try_from(interp.len()).unwrap().to_le_bytes());
+    elf[interp_off..].copy_from_slice(interp);
+    elf
 }
