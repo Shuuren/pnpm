@@ -20,6 +20,12 @@ export interface PathInfo {
 // Versions installed per package name, keyed by version.
 export type AuditPathIndex = Record<string, Map<string, PathInfo>>
 
+export interface UnresolvableLockfileDependency {
+  depPath: string
+  name: string
+  version: string
+}
+
 export interface AuditIndexRequest {
   // Flat map suitable as the POST body for `/advisories/bulk`.
   request: Record<string, string[]>
@@ -31,6 +37,11 @@ export interface AuditIndexRequest {
   dependencies: number
   devDependencies: number
   optionalDependencies: number
+  // A reference the walk could not resolve to a packages entry. Kept out of
+  // `request` so a vulnerability audit does not send it to the registry.
+  // Signature audit reports each one as invalid: a registry signature for the
+  // importer's version would hide a lockfile that has nothing to verify.
+  unresolvable: UnresolvableLockfileDependency[]
 }
 
 export interface AuditIndexOptions {
@@ -70,6 +81,18 @@ export function lockfileToAuditRequest (
   let dependencies = 0
   let devDependencies = 0
   let optionalDependencies = 0
+  const unresolvable: UnresolvableLockfileDependency[] = []
+  const seenUnresolvable = new Set<string>()
+  // A depPath that has a snapshot in any walked graph is resolvable, even when
+  // another graph (the env lockfile, for example) references it without one.
+  const resolvedDepPaths = new Set<string>()
+  const recordMissing = (missing: readonly string[]): void => {
+    for (const depPath of missing) {
+      if (seenUnresolvable.has(depPath)) continue
+      seenUnresolvable.add(depPath)
+      unresolvable.push(unresolvableFromDepPath(depPath))
+    }
+  }
 
   const registerOccurrence = (o: { name: string, version: string, devOnly: boolean, optionalOnly: boolean }): void => {
     let versionStates = versionStatesByName[o.name]
@@ -109,6 +132,7 @@ export function lockfileToAuditRequest (
   // untrusted lockfile cannot overflow the call stack.
   const makeVisitor = (graphDepTypes: DepTypes, graphOptionalOnly: Set<DepPath>) => {
     return (rootStep: LockfileWalkerStep): void => {
+      recordMissing(rootStep.missing)
       const stack: Array<{ dependencies: LockfileWalkerStep['dependencies'], next: number }> = [{ dependencies: rootStep.dependencies, next: 0 }]
       while (stack.length > 0) {
         const frame = stack[stack.length - 1]
@@ -117,6 +141,7 @@ export function lockfileToAuditRequest (
           continue
         }
         const { depPath, pkgSnapshot, next } = frame.dependencies[frame.next++]
+        resolvedDepPaths.add(depPath)
         const { name, version } = nameVerFromPkgSnapshot(depPath, pkgSnapshot)
         if (version) {
           registerOccurrence({
@@ -126,7 +151,9 @@ export function lockfileToAuditRequest (
             optionalOnly: graphOptionalOnly.has(depPath),
           })
         }
-        stack.push({ dependencies: next().dependencies, next: 0 })
+        const childStep = next()
+        recordMissing(childStep.missing)
+        stack.push({ dependencies: childStep.dependencies, next: 0 })
       }
     }
   }
@@ -145,7 +172,9 @@ export function lockfileToAuditRequest (
     }
   }
 
-  return { request, totalDependencies, dependencies, devDependencies, optionalDependencies }
+  const reportedUnresolvable = unresolvable.filter((dep) => !resolvedDepPaths.has(dep.depPath))
+  reportedUnresolvable.sort((left, right) => left.depPath.localeCompare(right.depPath))
+  return { request, totalDependencies, dependencies, devDependencies, optionalDependencies, unresolvable: reportedUnresolvable }
 }
 
 export function buildAuditPathIndex (
@@ -595,6 +624,15 @@ function resolvedDepsToDepPaths (deps: ResolvedDependencies): DepPath[] {
   return Object.entries(deps)
     .map(([alias, ref]) => dp.refToRelative(ref, alias))
     .filter((depPath): depPath is DepPath => depPath !== null)
+}
+
+function unresolvableFromDepPath (depPath: string): UnresolvableLockfileDependency {
+  const parsed = dp.parse(depPath)
+  return {
+    depPath,
+    name: parsed.name ?? depPath,
+    version: parsed.version ?? parsed.nonSemverVersion ?? '',
+  }
 }
 
 function envLockfileToLockfileObject (envLockfile: EnvLockfile): LockfileObject {

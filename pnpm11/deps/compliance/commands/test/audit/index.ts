@@ -7,6 +7,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test } from '@jest/
 import { AuditEndpointNotExistsError } from '@pnpm/deps.compliance.audit'
 import { audit } from '@pnpm/deps.compliance.commands'
 import { install } from '@pnpm/installing.commands'
+import { tempDir } from '@pnpm/prepare'
 import { fixtures } from '@pnpm/test-fixtures'
 import { getMockAgent, setupMockAgent, teardownMockAgent } from '@pnpm/testing.mock-agent'
 import { filterProjectsBySelectorObjectsFromDir } from '@pnpm/workspace.projects-filter'
@@ -221,6 +222,100 @@ describe('plugin-commands-audit', () => {
     expect(exitCode).toBe(0)
     expect(stripAnsi(output)).toContain('audited 2 packages')
     expect(stripAnsi(output)).toContain('2 packages have verified registry signatures')
+  })
+
+  test('audit signatures reports a dangling lockfile reference as invalid', async () => {
+    const key = createSigningKey()
+    mockRegistryKey(AUDIT_REGISTRY, key)
+    mockSignedPackument(key, 'signed-pkg', '1.0.0', 'sha512-test-integrity')
+    // uuid@13.0.2 is published and signed. A registry hit must not turn the
+    // missing lockfile entry into a verified package.
+    mockSignedPackument(key, 'uuid', '13.0.2', 'sha512-uuid-integrity')
+    const dir = writeSignatureLockfile({ includeSignedPkg: true })
+
+    const { output, exitCode } = await audit.handler({
+      ...AUDIT_REGISTRY_OPTS,
+      dir,
+      fetchRetries: 0,
+      json: true,
+      lockfileDir: dir,
+      rootProjectManifestDir: dir,
+    }, ['signatures'])
+
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output)).toEqual({
+      audited: 2,
+      invalid: [{
+        name: 'uuid',
+        reason: "Broken lockfile: no entry for 'uuid@13.0.2' in pnpm-lock.yaml",
+        registry: AUDIT_REGISTRY,
+        version: '13.0.2',
+      }],
+      missing: [],
+      verified: 1,
+    })
+  })
+
+  test('audit signatures fails when every lockfile reference is dangling', async () => {
+    const dir = writeSignatureLockfile({ includeSignedPkg: false })
+
+    const { output, exitCode } = await audit.handler({
+      ...AUDIT_REGISTRY_OPTS,
+      dir,
+      fetchRetries: 0,
+      json: true,
+      lockfileDir: dir,
+      rootProjectManifestDir: dir,
+    }, ['signatures'])
+
+    expect(exitCode).toBe(1)
+    expect(JSON.parse(output)).toEqual({
+      audited: 1,
+      invalid: [{
+        name: 'uuid',
+        reason: "Broken lockfile: no entry for 'uuid@13.0.2' in pnpm-lock.yaml",
+        registry: AUDIT_REGISTRY,
+        version: '13.0.2',
+      }],
+      missing: [],
+      verified: 0,
+    })
+  })
+
+  test('audit signatures strips control characters from an unresolvable package', async () => {
+    const dir = tempDir(false)
+    fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      "bad\\u0007name":
+        specifier: 1.0.0
+        version: 1.0.0
+
+snapshots: {}
+`)
+
+    const { output, exitCode } = await audit.handler({
+      ...AUDIT_REGISTRY_OPTS,
+      dir,
+      fetchRetries: 0,
+      json: true,
+      lockfileDir: dir,
+      rootProjectManifestDir: dir,
+    }, ['signatures'])
+
+    expect(exitCode).toBe(1)
+    const report = JSON.parse(output)
+    expect(report.audited).toBe(1)
+    expect(report.invalid).toEqual([{
+      name: 'badname',
+      reason: "Broken lockfile: no entry for 'badname@1.0.0' in pnpm-lock.yaml",
+      registry: AUDIT_REGISTRY,
+      version: '1.0.0',
+    }])
+    expect(output).not.toContain('\u0007')
   })
 
   test('audit rejects unknown subcommands', async () => {
@@ -675,6 +770,73 @@ describe('audit in a workspace', () => {
     })).rejects.toMatchObject({ code: 'ERR_PNPM_AUDIT_MISSING_IMPORTERS' })
   })
 })
+
+function writeSignatureLockfile ({ includeSignedPkg }: { includeSignedPkg: boolean }): string {
+  const dir = tempDir(false)
+  const signedImporter = includeSignedPkg
+    ? `
+      signed-pkg:
+        specifier: 1.0.0
+        version: 1.0.0`
+    : ''
+  const signedPackage = includeSignedPkg
+    ? `
+  signed-pkg@1.0.0:
+    resolution: {integrity: sha512-test-integrity}
+`
+    : ''
+  const signedSnapshot = includeSignedPkg
+    ? `
+  signed-pkg@1.0.0: {}
+`
+    : ''
+  fs.writeFileSync(path.join(dir, 'pnpm-lock.yaml'), `lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:${signedImporter}
+      uuid:
+        specifier: 13.0.2
+        version: 13.0.2
+
+packages:
+${signedPackage}
+  uuid@13.99.99:
+    resolution: {integrity: sha512-tampered}
+
+snapshots:
+${signedSnapshot}
+  uuid@13.99.99: {}
+`)
+  return dir
+}
+
+function mockSignedPackument (
+  key: ReturnType<typeof createSigningKey>,
+  name: string,
+  version: string,
+  integrity: string
+): void {
+  getMockAgent().get(AUDIT_REGISTRY.replace(/\/$/, ''))
+    .intercept({ path: `/${name}`, method: 'GET' })
+    .reply(200, {
+      name,
+      time: { [version]: '2023-01-01T00:00:00.000Z' },
+      versions: {
+        [version]: {
+          dist: {
+            integrity,
+            shasum: 'test-shasum',
+            signatures: [{ keyid: key.keyid, sig: key.sign(`${name}@${version}`, integrity) }],
+            tarball: `${AUDIT_REGISTRY}${name}/-/${name}-${version}.tgz`,
+          },
+          name,
+          version,
+        },
+      },
+    })
+}
 
 function createSigningKey (): {
   keyid: string

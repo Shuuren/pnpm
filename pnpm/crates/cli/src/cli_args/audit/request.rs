@@ -6,6 +6,13 @@ use super::{
     ResolvedDependencyMap, SnapshotEntry, SpecifierAndResolution, package_version,
 };
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnresolvableLockfileDependency {
+    pub(crate) dep_path: String,
+    pub(crate) name: String,
+    pub(crate) version: String,
+}
+
 #[derive(Debug, Default)]
 pub(crate) struct AuditIndexRequest {
     pub(crate) request: BTreeMap<String, Vec<String>>,
@@ -13,6 +20,12 @@ pub(crate) struct AuditIndexRequest {
     pub(crate) dependencies: usize,
     pub(crate) dev_dependencies: usize,
     pub(crate) optional_dependencies: usize,
+    /// References the walk could not resolve to a snapshot. Kept out of
+    /// [`Self::request`] so a vulnerability audit does not send them to the
+    /// registry. Signature audit reports each one as invalid: a registry
+    /// signature for the importer's version would hide a lockfile that has
+    /// nothing to verify.
+    pub(crate) unresolvable: Vec<UnresolvableLockfileDependency>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -250,6 +263,9 @@ pub(crate) struct AuditRequestBuilder {
     pub(crate) dependencies: usize,
     pub(crate) dev_dependencies: usize,
     pub(crate) optional_dependencies: usize,
+    /// `true` once any walked graph had a snapshot for the key. A later graph
+    /// that lacks the same key must not report it as unresolvable.
+    snapshot_presence: HashMap<PackageKey, bool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -268,6 +284,9 @@ impl AuditRequestBuilder {
             if !seen.insert(key.clone()) {
                 continue;
             }
+            if !self.observe_snapshot(&key, graph.snapshots.contains_key(&key)) {
+                continue;
+            }
             let class = classes
                 .get(&key)
                 .copied()
@@ -280,6 +299,19 @@ impl AuditRequestBuilder {
                     .map(|edge| edge.key),
             );
         }
+    }
+
+    /// Records whether `key` has a snapshot. Returns whether the walk should
+    /// register it as an installed package. A missing snapshot is not sent to
+    /// the registry: a valid signature for the importer's version would report
+    /// a broken lockfile as clean.
+    fn observe_snapshot(&mut self, key: &PackageKey, has_snapshot: bool) -> bool {
+        if has_snapshot {
+            self.snapshot_presence.insert(key.clone(), true);
+            return true;
+        }
+        self.snapshot_presence.entry(key.clone()).or_insert(false);
+        false
     }
 
     pub(crate) fn register_occurrence(&mut self, key: &PackageKey, class: DepClass) {
@@ -326,12 +358,41 @@ impl AuditRequestBuilder {
     }
 
     pub(crate) fn finish(self) -> AuditIndexRequest {
+        let mut unresolvable = self.snapshot_presence
+            .into_iter()
+            .filter(|(_, present)| !*present)
+            .map(|(key, _)| unresolvable_dependency(&key))
+            .collect::<Vec<_>>();
+        unresolvable.sort_by(|left, right| left.dep_path.cmp(&right.dep_path));
         AuditIndexRequest {
             request: self.request,
             total_dependencies: self.total_dependencies,
             dependencies: self.dependencies,
             dev_dependencies: self.dev_dependencies,
             optional_dependencies: self.optional_dependencies,
+            unresolvable,
         }
     }
+}
+
+fn unresolvable_dependency(key: &PackageKey) -> UnresolvableLockfileDependency {
+    UnresolvableLockfileDependency {
+        name: key.name.to_string(),
+        version: reported_version(key),
+        dep_path: key.to_string(),
+    }
+}
+
+/// Version shown for an unresolvable reference. Matches `@pnpm/deps.path`
+/// `parse`: a named-registry slot (`work:1.2.3`) contributes its bare semver,
+/// and a `runtime:` prefix stays on the version string.
+fn reported_version(key: &PackageKey) -> String {
+    let prefix = key.suffix.prefix().as_str();
+    if prefix.is_empty() {
+        if let Some((_, version)) = key.suffix.registry_qualified() {
+            return version.to_string();
+        }
+        return key.suffix.version().to_string();
+    }
+    format!("{prefix}{}", key.suffix.version())
 }

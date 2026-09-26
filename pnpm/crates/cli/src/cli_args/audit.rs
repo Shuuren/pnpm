@@ -13,9 +13,9 @@ pub(crate) use report::{
     redact_url_userinfo, sanitize_response_body,
 };
 pub(crate) use request::{
-    AuditGraph, AuditIndexRequest, DepClass, DepKind, Edge, GraphImporter, Include, classify_graph,
-    empty_packages, empty_snapshots, env_roots, importer_roots, lockfile_to_audit_request,
-    root_included,
+    AuditGraph, AuditIndexRequest, DepClass, DepKind, Edge, GraphImporter, Include,
+    UnresolvableLockfileDependency, classify_graph, empty_packages, empty_snapshots, env_roots,
+    importer_roots, lockfile_to_audit_request, root_included,
 };
 pub(crate) use version_ranges::{
     caret_range_for_patched, infer_patched_versions, is_range_subset, min_version_from_range,
@@ -354,22 +354,34 @@ impl AuditArgs {
 
     /// Handle `audit signatures`: verify registry signatures for every
     /// installed package and print the report. Exit code 1 (via
-    /// [`AuditOutcome::Vulnerable`]) when any signature is missing or invalid.
+    /// [`AuditOutcome::Vulnerable`]) when any signature is missing or invalid,
+    /// including a lockfile reference that has no snapshot to verify.
     /// Ports pnpm's `auditSignatures`.
     async fn run_signatures(&self, state: State) -> miette::Result<AuditOutcome> {
         let include = self.dependency_options.include(state.config);
         let lockfile_dir = state.lockfile_dir().to_path_buf();
 
-        let Some(packages) = signature_packages(&state, include, &lockfile_dir)? else {
+        let Some(audit_set) = signature_packages(&state, include, &lockfile_dir)? else {
             return Ok(AuditOutcome::Clean);
         };
-        if packages.is_empty() {
+        if audit_set.packages.is_empty() && audit_set.unresolvable.is_empty() {
             return Err(AuditError::NoPackages.into());
         }
 
-        let result =
-            signatures::verify_signatures(&packages, state.config, state.http_client.as_ref())
-                .await?;
+        let mut result = if audit_set.packages.is_empty() {
+            signatures::SignatureVerificationResult::default()
+        } else {
+            signatures::verify_signatures(
+                &audit_set.packages,
+                state.config,
+                state.http_client.as_ref(),
+            )
+            .await?
+        };
+        let unresolvable_count = audit_set.unresolvable.len();
+        result.invalid.extend(audit_set.unresolvable);
+        result.audited += unresolvable_count;
+        result.invalid.sort_by_key(|issue| format!("{}@{}", issue.name, issue.version));
 
         let output = if self.json {
             serde_json::to_string_pretty(&result).into_diagnostic()?

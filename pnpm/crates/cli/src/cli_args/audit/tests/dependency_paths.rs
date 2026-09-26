@@ -159,6 +159,185 @@ fn lockfile_to_audit_request_ignores_unreachable_env_packages() {
 
     assert!(request.request.contains_key("my-config"));
     assert!(!request.request.contains_key("orphan-pkg"));
+    assert!(request.unresolvable.is_empty());
+}
+
+#[test]
+fn lockfile_to_audit_request_reports_a_dependency_with_no_snapshot() {
+    let lockfile = parse_lockfile(
+        "
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      ms:
+        specifier: 2.1.3
+        version: 2.1.3
+      uuid:
+        specifier: 13.0.2
+        version: 13.0.2
+
+  packages/app:
+    dependencies:
+      uuid:
+        specifier: 13.0.2
+        version: 13.0.2
+
+snapshots:
+
+  ms@2.1.3:
+    dependencies:
+      left-pad: '1.0.0'
+
+  uuid@13.99.99: {}
+",
+    );
+    let mut env = EnvLockfile::create();
+    env.root_importer_mut().config_dependencies
+        .insert(
+            "uuid".to_string(),
+            SpecifierAndResolution {
+                specifier: "13.0.2".to_string(),
+                version: "13.0.2".to_string(),
+            },
+        );
+    env.root_importer_mut().config_dependencies
+        .insert(
+            "orphan".to_string(),
+            SpecifierAndResolution { specifier: "1.0.0".to_string(), version: "1.0.0".to_string() },
+        );
+
+    let request = lockfile_to_audit_request(&lockfile, Some(&env), all_dependencies());
+
+    assert_eq!(request.request["ms"], vec!["2.1.3"]);
+    assert!(!request.request.contains_key("uuid"));
+    assert!(!request.request.contains_key("left-pad"));
+    assert!(!request.request.contains_key("orphan"));
+    assert_eq!(request.total_dependencies, 1);
+    let dep_paths: Vec<_> = request.unresolvable
+        .iter()
+        .map(|dep| dep.dep_path.as_str())
+        .collect();
+    assert_eq!(dep_paths, vec!["left-pad@1.0.0", "orphan@1.0.0", "uuid@13.0.2"]);
+    let uuid = request.unresolvable
+        .iter()
+        .find(|dep| dep.name == "uuid")
+        .expect("uuid");
+    assert_eq!(uuid.version, "13.0.2");
+}
+
+#[test]
+fn lockfile_to_audit_request_keeps_a_dependency_another_graph_resolved() {
+    let lockfile = parse_lockfile(
+        "
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      uuid:
+        specifier: 13.0.2
+        version: 13.0.2
+
+snapshots:
+
+  uuid@13.0.2: {}
+",
+    );
+    let mut env = EnvLockfile::create();
+    env.root_importer_mut().config_dependencies
+        .insert(
+            "uuid".to_string(),
+            SpecifierAndResolution {
+                specifier: "13.0.2".to_string(),
+                version: "13.0.2".to_string(),
+            },
+        );
+
+    let request = lockfile_to_audit_request(&lockfile, Some(&env), all_dependencies());
+
+    assert_eq!(request.request["uuid"], vec!["13.0.2"]);
+    assert_eq!(request.total_dependencies, 1);
+    assert!(request.unresolvable.is_empty());
+}
+
+#[test]
+fn lockfile_to_audit_request_reports_only_included_dangling_references() {
+    let lockfile = parse_lockfile(
+        "
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      uuid:
+        specifier: 13.0.2
+        version: 13.0.2
+    devDependencies:
+      only-dev:
+        specifier: 1.0.0
+        version: 1.0.0
+
+snapshots: {}
+",
+    );
+
+    let request = lockfile_to_audit_request(&lockfile, None, prod_without_optional());
+
+    assert!(request.request.is_empty());
+    let dep_paths: Vec<_> = request.unresolvable
+        .iter()
+        .map(|dep| dep.dep_path.as_str())
+        .collect();
+    assert_eq!(dep_paths, vec!["uuid@13.0.2"]);
+}
+
+#[test]
+fn lockfile_to_audit_request_parses_dangling_references_like_the_dep_path_parser() {
+    let lockfile = parse_lockfile(
+        "
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      foo:
+        specifier: 1.0.0
+        version: '1.0.0(bar@2.0.0)'
+      local:
+        specifier: file:../local
+        version: file:../local
+      qualified:
+        specifier: 1.2.3
+        version: work:1.2.3
+      node:
+        specifier: runtime:22.0.0
+        version: runtime:22.0.0
+      linked:
+        specifier: link:../linked
+        version: link:../linked
+
+snapshots: {}
+",
+    );
+
+    let request = lockfile_to_audit_request(&lockfile, None, all_dependencies());
+
+    let by_name: std::collections::BTreeMap<_, _> = request.unresolvable
+        .iter()
+        .map(|dep| (dep.name.as_str(), (dep.version.as_str(), dep.dep_path.as_str())))
+        .collect();
+    assert_eq!(by_name["foo"], ("1.0.0", "foo@1.0.0(bar@2.0.0)"),);
+    assert_eq!(by_name["local"], ("file:../local", "local@file:../local"));
+    assert_eq!(by_name["qualified"], ("1.2.3", "qualified@work:1.2.3"));
+    assert_eq!(by_name["node"], ("runtime:22.0.0", "node@runtime:22.0.0"));
+    assert!(!by_name.contains_key("linked"));
+    assert_eq!(request.unresolvable.len(), 4);
 }
 
 #[test]
