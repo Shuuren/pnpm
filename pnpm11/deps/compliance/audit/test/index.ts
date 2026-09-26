@@ -28,6 +28,144 @@ describe('audit', () => {
     expect(result.request).toEqual({ foo: ['1.0.0'], bar: ['1.0.0'] })
     expect(result.totalDependencies).toBe(2)
     expect(result.devDependencies).toBe(0)
+    expect(result.unresolvable).toEqual([])
+  })
+
+  test('lockfileToAuditRequest() reports a dependency reference with no packages entry', () => {
+    const result = lockfileToAuditRequest({
+      importers: {
+        ['.' as ProjectId]: {
+          dependencies: { ms: '2.1.3', uuid: '13.0.2' },
+          specifiers: { ms: '2.1.3', uuid: '13.0.2' },
+        },
+        ['packages/app' as ProjectId]: {
+          dependencies: { uuid: '13.0.2' },
+          specifiers: { uuid: '13.0.2' },
+        },
+      },
+      lockfileVersion: LOCKFILE_VERSION,
+      packages: {
+        ['ms@2.1.3' as DepPath]: {
+          dependencies: { 'left-pad': '1.0.0' },
+          resolution: { integrity: 'ms-integrity' },
+        },
+        ['uuid@13.99.99' as DepPath]: {
+          resolution: { integrity: 'uuid-integrity' },
+        },
+      },
+    }, {
+      envLockfile: {
+        lockfileVersion: LOCKFILE_VERSION,
+        importers: {
+          '.': {
+            configDependencies: {
+              orphan: { specifier: '1.0.0', version: '1.0.0' },
+              uuid: { specifier: '13.0.2', version: '13.0.2' },
+            },
+          },
+        },
+        packages: {},
+        snapshots: {},
+      },
+    })
+
+    expect(result.request).toEqual({ ms: ['2.1.3'] })
+    expect(result.totalDependencies).toBe(1)
+    expect(result.unresolvable).toEqual([
+      { depPath: 'left-pad@1.0.0', name: 'left-pad', version: '1.0.0' },
+      { depPath: 'orphan@1.0.0', name: 'orphan', version: '1.0.0' },
+      { depPath: 'uuid@13.0.2', name: 'uuid', version: '13.0.2' },
+    ])
+  })
+
+  test('lockfileToAuditRequest() does not report a dependency another graph resolved', () => {
+    const result = lockfileToAuditRequest({
+      importers: {
+        ['.' as ProjectId]: {
+          dependencies: { uuid: '13.0.2' },
+          specifiers: { uuid: '13.0.2' },
+        },
+      },
+      lockfileVersion: LOCKFILE_VERSION,
+      packages: {
+        ['uuid@13.0.2' as DepPath]: { resolution: { integrity: 'uuid-integrity' } },
+      },
+    }, {
+      envLockfile: {
+        lockfileVersion: LOCKFILE_VERSION,
+        importers: {
+          '.': {
+            configDependencies: {
+              uuid: { specifier: '13.0.2', version: '13.0.2' },
+            },
+          },
+        },
+        packages: {},
+        snapshots: {},
+      },
+    })
+
+    expect(result.request).toEqual({ uuid: ['13.0.2'] })
+    expect(result.totalDependencies).toBe(1)
+    expect(result.unresolvable).toEqual([])
+  })
+
+  test('lockfileToAuditRequest() reports only included dangling references', () => {
+    const result = lockfileToAuditRequest({
+      importers: {
+        ['.' as ProjectId]: {
+          dependencies: { uuid: '13.0.2' },
+          devDependencies: { 'only-dev': '1.0.0' },
+          specifiers: { uuid: '13.0.2', 'only-dev': '1.0.0' },
+        },
+      },
+      lockfileVersion: LOCKFILE_VERSION,
+      packages: {},
+    }, {
+      include: {
+        dependencies: true,
+        devDependencies: false,
+        optionalDependencies: false,
+      },
+    })
+
+    expect(result.request).toEqual({})
+    expect(result.unresolvable).toEqual([
+      { depPath: 'uuid@13.0.2', name: 'uuid', version: '13.0.2' },
+    ])
+  })
+
+  test('lockfileToAuditRequest() parses dangling references the same way on every version form', () => {
+    const result = lockfileToAuditRequest({
+      importers: {
+        ['.' as ProjectId]: {
+          dependencies: {
+            foo: '1.0.0(bar@2.0.0)',
+            local: 'file:../local',
+            qualified: 'work:1.2.3',
+            node: 'runtime:22.0.0',
+            linked: 'link:../linked',
+          },
+          specifiers: {
+            foo: '1.0.0',
+            local: 'file:../local',
+            qualified: '1.2.3',
+            node: 'runtime:22.0.0',
+            linked: 'link:../linked',
+          },
+        },
+      },
+      lockfileVersion: LOCKFILE_VERSION,
+      packages: {},
+    }, {})
+
+    expect(result.request).toEqual({})
+    expect(result.unresolvable).toEqual([
+      { depPath: 'foo@1.0.0(bar@2.0.0)', name: 'foo', version: '1.0.0' },
+      { depPath: 'local@file:../local', name: 'local', version: 'file:../local' },
+      { depPath: 'node@runtime:22.0.0', name: 'node', version: 'runtime:22.0.0' },
+      { depPath: 'qualified@work:1.2.3', name: 'qualified', version: '1.2.3' },
+    ])
   })
 
   test('lockfileToAuditRequest() does not treat a dependency named after an Object.prototype property as a peer-satisfaction edge', () => {

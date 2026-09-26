@@ -1,9 +1,11 @@
 import { TABLE_OPTIONS } from '@pnpm/cli.utils'
 import { pickRegistryForPackage } from '@pnpm/config.pick-registry-for-package'
+import { WANTED_LOCKFILE } from '@pnpm/constants'
 import { lockfileToAuditRequest } from '@pnpm/deps.compliance.audit'
-import { type SignaturePackage, type SignatureVerificationResult, verifySignatures } from '@pnpm/deps.security.signatures'
+import { type SignatureIssue, type SignaturePackage, type SignatureVerificationResult, verifySignatures } from '@pnpm/deps.security.signatures'
 import { PnpmError } from '@pnpm/error'
 import { createGetAuthHeaderByURI } from '@pnpm/network.auth-header'
+import { sanitizeInline } from '@pnpm/text.sanitize'
 import { table } from '@zkochan/table'
 import chalk from 'chalk'
 
@@ -20,32 +22,58 @@ export async function auditSignatures (opts: AuditOptions): Promise<{ exitCode: 
   const packages: SignaturePackage[] = Object.entries(auditRequest.request).flatMap(([name, versions]) => (
     versions.map((version) => ({ name, registry: pickRegistryForPackage(opts.registriesByScope, name), version }))
   ))
-  if (packages.length === 0) {
+  const unresolvable = auditRequest.unresolvable.map((dep) => unresolvableSignatureIssue(dep, opts))
+  if (packages.length === 0 && unresolvable.length === 0) {
     throw new PnpmError('AUDIT_NO_PACKAGES', 'No installed packages found to audit')
   }
 
-  const getAuthHeader = createGetAuthHeaderByURI(opts.configByUri)
-  const networkOptions = createAuditNetworkOptions(opts)
-  const result = await verifySignatures(packages, getAuthHeader, {
-    ca: networkOptions.ca,
-    cert: networkOptions.cert,
-    configByUri: networkOptions.configByUri,
-    httpProxy: networkOptions.httpProxy,
-    httpsProxy: networkOptions.httpsProxy,
-    key: networkOptions.key,
-    localAddress: networkOptions.localAddress,
-    maxSockets: networkOptions.maxSockets,
-    networkConcurrency: opts.networkConcurrency,
-    noProxy: networkOptions.noProxy,
-    retry: networkOptions.retry,
-    strictSsl: networkOptions.strictSsl,
-    timeout: networkOptions.fetchTimeout,
-  })
+  let result: SignatureVerificationResult = { audited: 0, invalid: [], missing: [], verified: 0 }
+  if (packages.length > 0) {
+    const getAuthHeader = createGetAuthHeaderByURI(opts.configByUri)
+    const networkOptions = createAuditNetworkOptions(opts)
+    result = await verifySignatures(packages, getAuthHeader, {
+      ca: networkOptions.ca,
+      cert: networkOptions.cert,
+      configByUri: networkOptions.configByUri,
+      httpProxy: networkOptions.httpProxy,
+      httpsProxy: networkOptions.httpsProxy,
+      key: networkOptions.key,
+      localAddress: networkOptions.localAddress,
+      maxSockets: networkOptions.maxSockets,
+      networkConcurrency: opts.networkConcurrency,
+      noProxy: networkOptions.noProxy,
+      retry: networkOptions.retry,
+      strictSsl: networkOptions.strictSsl,
+      timeout: networkOptions.fetchTimeout,
+    })
+  }
+  for (const issue of unresolvable) {
+    result.invalid.push(issue)
+    result.audited++
+  }
+  result.invalid.sort(compareSignatureIssue)
 
   return {
     exitCode: result.invalid.length > 0 || result.missing.length > 0 ? 1 : 0,
     output: opts.json ? JSON.stringify(result, null, 2) : renderSignatureVerificationResult(result),
   }
+}
+
+function unresolvableSignatureIssue (
+  dep: { depPath: string, name: string, version: string },
+  opts: AuditOptions
+): SignatureIssue {
+  const depPath = sanitizeInline(dep.depPath)
+  return {
+    name: sanitizeInline(dep.name),
+    registry: pickRegistryForPackage(opts.registriesByScope, dep.name),
+    version: sanitizeInline(dep.version),
+    reason: `Broken lockfile: no entry for '${depPath}' in ${WANTED_LOCKFILE}`,
+  }
+}
+
+function compareSignatureIssue (left: SignatureIssue, right: SignatureIssue): number {
+  return `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`)
 }
 
 function renderSignatureVerificationResult (result: SignatureVerificationResult): string {

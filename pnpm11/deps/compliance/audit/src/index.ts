@@ -16,7 +16,7 @@ import {
 } from './lockfileToAuditIndex.js'
 import type { AuditAdvisory, AuditFinding, AuditLevelString, AuditReport, AuditVulnerabilityCounts } from './types.js'
 
-export type { AuditIndexRequest, AuditPathIndex, PathInfo } from './lockfileToAuditIndex.js'
+export type { AuditIndexRequest, AuditPathIndex, PathInfo, UnresolvableLockfileDependency } from './lockfileToAuditIndex.js'
 export { buildAuditPathIndex, lockfileToAuditRequest } from './lockfileToAuditIndex.js'
 export * from './types.js'
 

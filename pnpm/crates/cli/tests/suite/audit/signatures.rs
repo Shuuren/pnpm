@@ -274,6 +274,147 @@ fn audit_signatures_redacts_registry_credentials_on_network_error() {
 }
 
 #[test]
+fn audit_signatures_reports_a_dangling_lockfile_reference_as_invalid() {
+    let CommandTempCwd {
+        mut pacquet, workspace, root: _root, ..
+    } = CommandTempCwd::init();
+    let mut registry = mockito::Server::new();
+    let key = signing_key();
+    let integrity = "sha512-abc";
+    let signature = sign_b64(&key, &format!("signed-pkg@1.0.0:{integrity}"));
+    let keys_mock = keys_mock(&mut registry, &public_key_b64(&key)).create();
+    let packument_mock = registry
+        .mock("GET", "/signed-pkg")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(packument_body("signed-pkg", "1.0.0", integrity, &signatures_json(&signature)))
+        .create();
+    // A published, signed uuid@13.0.2 must not count as verified when the
+    // lockfile has no snapshot for that reference.
+    let uuid_mock = registry
+        .mock("GET", "/uuid")
+        .expect(0)
+        .create();
+    write_dangling_signature_lockfile(&workspace, &registry.url(), true);
+
+    let output = pacquet
+        .arg("audit")
+        .arg("signatures")
+        .arg("--json")
+        .output()
+        .expect("run audit signatures");
+
+    assert_failure(&output);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("signatures JSON");
+    assert_eq!(report["audited"], 2);
+    assert_eq!(report["verified"], 1);
+    assert_eq!(
+        report["missing"]
+            .as_array()
+            .expect("missing")
+            .len(),
+        0
+    );
+    let invalid = report["invalid"].as_array().expect("invalid");
+    assert_eq!(invalid.len(), 1);
+    assert_eq!(invalid[0]["name"], "uuid");
+    assert_eq!(invalid[0]["version"], "13.0.2");
+    assert_eq!(
+        invalid[0]["reason"],
+        "Broken lockfile: no entry for 'uuid@13.0.2' in pnpm-lock.yaml"
+    );
+    keys_mock.assert();
+    packument_mock.assert();
+    uuid_mock.assert();
+}
+
+#[test]
+fn audit_signatures_fails_when_every_lockfile_reference_is_dangling() {
+    let CommandTempCwd {
+        mut pacquet, workspace, root: _root, ..
+    } = CommandTempCwd::init();
+    write_dangling_signature_lockfile(&workspace, "http://127.0.0.1:9", false);
+
+    let output = pacquet
+        .arg("audit")
+        .arg("signatures")
+        .arg("--json")
+        .output()
+        .expect("run audit signatures");
+
+    assert_failure(&output);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("signatures JSON");
+    assert_eq!(report["audited"], 1);
+    assert_eq!(report["verified"], 0);
+    assert_eq!(
+        report["missing"]
+            .as_array()
+            .expect("missing")
+            .len(),
+        0
+    );
+    let invalid = report["invalid"].as_array().expect("invalid");
+    assert_eq!(invalid.len(), 1);
+    assert_eq!(invalid[0]["name"], "uuid");
+    assert_eq!(invalid[0]["version"], "13.0.2");
+    assert_eq!(
+        invalid[0]["reason"],
+        "Broken lockfile: no entry for 'uuid@13.0.2' in pnpm-lock.yaml"
+    );
+}
+
+#[test]
+fn audit_signatures_strips_control_characters_from_an_unresolvable_package() {
+    let CommandTempCwd {
+        mut pacquet, workspace, root: _root, ..
+    } = CommandTempCwd::init();
+    fs::write(workspace.join(".npmrc"), "registry=http://127.0.0.1:9/\n").expect("write .npmrc");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "fetchRetries: 0\n")
+        .expect("write workspace manifest");
+    write_minimal_manifest(&workspace);
+    fs::write(
+        workspace.join("pnpm-lock.yaml"),
+        "\
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:
+      \"bad\\u0007name\":
+        specifier: 1.0.0
+        version: 1.0.0
+
+snapshots: {}
+",
+    )
+    .expect("write lockfile");
+
+    let output = pacquet
+        .arg("audit")
+        .arg("signatures")
+        .arg("--json")
+        .output()
+        .expect("run audit signatures");
+
+    assert_failure(&output);
+    let report: serde_json::Value =
+        serde_json::from_str(&stdout(&output)).expect("signatures JSON");
+    assert_eq!(report["audited"], 1);
+    let invalid = report["invalid"].as_array().expect("invalid");
+    assert_eq!(invalid.len(), 1);
+    assert_eq!(invalid[0]["name"], "badname");
+    assert_eq!(invalid[0]["version"], "1.0.0");
+    assert_eq!(
+        invalid[0]["reason"],
+        "Broken lockfile: no entry for 'badname@1.0.0' in pnpm-lock.yaml"
+    );
+    assert!(!stdout(&output).contains('\u{7}'));
+}
+
+#[test]
 fn audit_signatures_errors_when_no_packages() {
     let CommandTempCwd {
         mut pacquet, workspace, root: _root, ..
@@ -363,6 +504,61 @@ fn packument_body(name: &str, version: &str, integrity: &str, signatures_json: &
     format!(
         r#"{{"name":"{name}","versions":{{"{version}":{{"name":"{name}","version":"{version}","dist":{{"integrity":"{integrity}","tarball":"https://example.com/{name}-{version}.tgz","signatures":{signatures_json}}}}}}},"time":{{"{version}":"2020-01-01T00:00:00.000Z"}}}}"#,
     )
+}
+
+fn write_dangling_signature_lockfile(
+    workspace: &Path,
+    registry_url: &str,
+    include_signed_pkg: bool,
+) {
+    fs::write(workspace.join(".npmrc"), format!("registry={registry_url}/\n"))
+        .expect("write .npmrc");
+    fs::write(workspace.join("pnpm-workspace.yaml"), "fetchRetries: 0\n")
+        .expect("write workspace manifest");
+    let signed_manifest = if include_signed_pkg { "\"signed-pkg\": \"1.0.0\", " } else { "" };
+    fs::write(
+        workspace.join("package.json"),
+        format!(
+            r#"{{"name":"sig-test","version":"1.0.0","dependencies":{{{signed_manifest}"uuid":"13.0.2"}}}}"#
+        ),
+    )
+    .expect("write package.json");
+    let signed_importer = if include_signed_pkg {
+        "
+      signed-pkg:
+        specifier: 1.0.0
+        version: 1.0.0"
+    } else {
+        ""
+    };
+    let signed_snapshot = if include_signed_pkg {
+        "
+  signed-pkg@1.0.0: {}
+"
+    } else {
+        ""
+    };
+    fs::write(
+        workspace.join("pnpm-lock.yaml"),
+        format!(
+            "
+lockfileVersion: '9.0'
+
+importers:
+
+  .:
+    dependencies:{signed_importer}
+      uuid:
+        specifier: 13.0.2
+        version: 13.0.2
+
+snapshots:
+{signed_snapshot}
+  uuid@13.99.99: {{}}
+"
+        ),
+    )
+    .expect("write lockfile");
 }
 
 fn write_signatures_workspace(workspace: &Path, registry_url: &str, name: &str) {

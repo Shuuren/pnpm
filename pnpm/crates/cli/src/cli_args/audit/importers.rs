@@ -1,13 +1,15 @@
 //! The lockfile importers `audit` and `audit signatures` cover.
 
 use super::{
-    AuditError, EnvLockfile, HashMap, Include, Lockfile, State, lockfile_to_audit_request,
-    pick_registry_for_package, signatures,
+    AuditError, AuditIndexRequest, EnvLockfile, HashMap, Include, Lockfile, State,
+    UnresolvableLockfileDependency, lockfile_to_audit_request, pick_registry_for_package,
+    signatures,
 };
 use crate::cli_args::recursive::{
     no_projects_matched_message, notice_workspace_dir, selected_workspace_importer_ids,
     selectors_narrow_the_run,
 };
+use crate::cli_args::sanitize::sanitize_inline;
 use std::borrow::Cow;
 
 /// The lockfile narrowed to the importers of the projects that `--filter`,
@@ -43,14 +45,21 @@ pub(super) fn select_audited_importers<'lockfile>(
     Ok(Some(Cow::Owned(narrowed)))
 }
 
+/// Installed packages to verify, plus lockfile references that have no snapshot.
+pub(super) struct SignatureAuditSet {
+    pub(super) packages: Vec<signatures::SignaturePackage>,
+    pub(super) unresolvable: Vec<signatures::SignatureIssue>,
+}
+
 /// Every installed package version the lockfile and env lockfile record,
 /// with the registry that serves it. `None` when the selectors matched no
-/// project.
+/// project. Unresolvable references are returned beside the packages so the
+/// signature audit can fail closed without asking the registry about them.
 pub(super) fn signature_packages(
     state: &State,
     include: Include,
     lockfile_dir: &std::path::Path,
-) -> miette::Result<Option<Vec<signatures::SignaturePackage>>> {
+) -> miette::Result<Option<SignatureAuditSet>> {
     let lockfile = state.lockfile
         .get()
         .map_err(|err| miette::Report::new(err).wrap_err("load the lockfile"))?;
@@ -68,19 +77,52 @@ pub(super) fn signature_packages(
         .resolved_registries()
         .into_iter()
         .collect();
-    Ok(Some(
-        audit_request.request
-            .iter()
-            .flat_map(|(name, versions)| {
-                let registry = pick_registry_for_package(&registries, name, None);
-                versions
-                    .iter()
-                    .map(move |version| signatures::SignaturePackage {
-                        name: name.clone(),
-                        registry: registry.clone(),
-                        version: version.clone(),
-                    })
-            })
-            .collect(),
-    ))
+    Ok(Some(SignatureAuditSet {
+        packages: packages_from_request(&audit_request, &registries),
+        unresolvable: unresolvable_signature_issues(&audit_request, &registries),
+    }))
+}
+
+fn packages_from_request(
+    audit_request: &AuditIndexRequest,
+    registries: &HashMap<String, String>,
+) -> Vec<signatures::SignaturePackage> {
+    audit_request.request
+        .iter()
+        .flat_map(|(name, versions)| {
+            let registry = pick_registry_for_package(registries, name, None);
+            versions
+                .iter()
+                .map(move |version| signatures::SignaturePackage {
+                    name: name.clone(),
+                    registry: registry.clone(),
+                    version: version.clone(),
+                })
+        })
+        .collect()
+}
+
+fn unresolvable_signature_issues(
+    audit_request: &AuditIndexRequest,
+    registries: &HashMap<String, String>,
+) -> Vec<signatures::SignatureIssue> {
+    audit_request.unresolvable
+        .iter()
+        .map(|dep| unresolvable_issue(dep, registries))
+        .collect()
+}
+
+fn unresolvable_issue(
+    dep: &UnresolvableLockfileDependency,
+    registries: &HashMap<String, String>,
+) -> signatures::SignatureIssue {
+    let dep_path = sanitize_inline(&dep.dep_path);
+    signatures::SignatureIssue {
+        name: sanitize_inline(&dep.name).into_owned(),
+        registry: pick_registry_for_package(registries, &dep.name, None),
+        version: sanitize_inline(&dep.version).into_owned(),
+        integrity: None,
+        reason: Some(format!("Broken lockfile: no entry for '{dep_path}' in pnpm-lock.yaml")),
+        resolved: None,
+    }
 }
