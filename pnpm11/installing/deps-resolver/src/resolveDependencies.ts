@@ -31,6 +31,7 @@ import { safeReadPackageJsonFromDir } from '@pnpm/pkg-manifest.reader'
 import { convertEnginesRuntimeToDependencies } from '@pnpm/pkg-manifest.utils'
 import { parseBareSpecifier } from '@pnpm/resolving.npm-resolver'
 import {
+  classifyResolution,
   DIRECT_DEP_SELECTOR_WEIGHT,
   type DirectoryResolution,
   EXISTING_VERSION_SELECTOR_WEIGHT,
@@ -171,6 +172,12 @@ export interface ResolutionContext extends RegistryContext {
   defaultTag: string
   dryRun: boolean
   forceFullResolution: boolean
+  /**
+   * Read peer ranges from the live manifest. Set when a hook, override,
+   * extension, or an explicit re-read may have changed them. A full
+   * resolution that only relinks peers still reuses the recorded ranges.
+   */
+  rereadManifestPeers: boolean
   staleOverrideTargets?: ReadonlySet<string>
   updateChecksums?: boolean
   ignoreScripts?: boolean
@@ -2423,6 +2430,13 @@ async function resolveDependency (
     if (ctx.readPackageHook != null && !pkgResponse.body.hooked) {
       pkg = await ctx.readPackageHook(pkg)
     }
+    pkg = reuseRecordedPeerDependencies(pkg, {
+      dependencyLockfile: currentPkg.dependencyLockfile,
+      rereadManifestPeers: ctx.rereadManifestPeers,
+      resolution: pkgResponse.body.resolution,
+      update: options.update,
+      updated: pkgResponse.body.updated,
+    })
     if (!pkg.version) {
       pkg.version = '0.0.0'
     }
@@ -2697,6 +2711,51 @@ export function getManifestFromResponse (
   return {
     name: wantedDependency.alias ? wantedDependency.alias : wantedDependency.bareSpecifier.split('/').pop()!,
   } as PackageManifest
+}
+
+/**
+ * Peer ranges an unchanged registry package records again.
+ *
+ * The lockfile already holds the ranges taken from the manifest after hooks,
+ * extensions, and overrides. A later install re-reads the registry manifest,
+ * and that object can carry a version synthesized from sibling peer ranges.
+ * Reusing the recorded ranges matches lockfile reuse: the manifest is rebuilt
+ * from the lockfile, so the recorded ranges are what get written again.
+ * A changed hook, override, extension, or an explicit re-read still takes
+ * the live manifest.
+ */
+function reuseRecordedPeerDependencies (
+  pkg: PackageManifest,
+  opts: {
+    dependencyLockfile?: PackageSnapshot
+    rereadManifestPeers: boolean
+    resolution: Resolution
+    update: false | 'compatible' | 'latest'
+    updated: boolean
+  }
+): PackageManifest {
+  const recorded = opts.dependencyLockfile
+  if (
+    opts.rereadManifestPeers ||
+    opts.update !== false ||
+    opts.updated ||
+    recorded?.peerDependencies == null ||
+    classifyResolution(opts.resolution) !== 'remoteTarball'
+  ) {
+    return pkg
+  }
+  const reused: PackageManifest = {
+    ...pkg,
+    peerDependencies: { ...recorded.peerDependencies },
+  }
+  if (recorded.peerDependenciesMeta == null) {
+    delete reused.peerDependenciesMeta
+  } else {
+    reused.peerDependenciesMeta = Object.fromEntries(
+      Object.entries(recorded.peerDependenciesMeta).map(([peerName, peerMeta]) => [peerName, { ...peerMeta }])
+    )
+  }
+  return reused
 }
 
 /**

@@ -2528,6 +2528,13 @@ const _installInContext: InstallFunction = async (projects, ctx, opts) => {
     ctx.lockfileHadConflicts ||
     opts.dedupePeerDependents ||
     untrackedReadPackageHookMayHaveChanged
+  // Peer dedupe and a stale modules lockfile re-resolve the graph without
+  // changing the manifest ranges the lockfile already recorded.
+  const rereadManifestPeers = ctx.wantedLockfile.lockfileVersion !== LOCKFILE_VERSION ||
+    opts.force ||
+    opts.needsFullResolution ||
+    ctx.lockfileHadConflicts ||
+    untrackedReadPackageHookMayHaveChanged
   setUntrackedPnpmfileReadPackageHook(ctx.wantedLockfile, untrackedPnpmfileReadPackageHook)
 
   // Ignore some fields when fixing lockfile, so these fields can be regenerated
@@ -2583,6 +2590,7 @@ const _installInContext: InstallFunction = async (projects, ctx, opts) => {
       excludeLinksFromLockfile: opts.excludeLinksFromLockfile,
       force: opts.force,
       forceFullResolution,
+      rereadManifestPeers,
       staleOverrideTargets: opts.staleOverrideTargets,
       updateChecksums: opts.updateChecksums,
       ignoreScripts: opts.ignoreScripts,
