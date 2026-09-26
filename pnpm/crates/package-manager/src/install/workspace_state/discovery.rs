@@ -50,14 +50,9 @@ pub fn check_deps_status_before_run_at(
         GateManifest::NoManifest => return None,
         GateManifest::Unreadable => return cannot_check_deps(),
     };
-    let Ok(workspace_manifest) = workspace_dir_opt
-        .as_deref()
-        .map(pnpm_workspace::read_workspace_manifest)
-        .transpose()
-    else {
+    let Ok(workspace_manifest) = gate_workspace_manifest(workspace_dir_opt.as_deref()) else {
         return cannot_check_deps();
     };
-    let workspace_manifest = workspace_manifest.flatten();
     let config = gate_config(config, manifest_dir, &manifest);
     // A pinned `lockfileDir` is where the install left the state and the
     // lockfile; otherwise it follows the manifest read above, just as it
@@ -69,7 +64,13 @@ pub fn check_deps_status_before_run_at(
     // only to reach the same verdict inside the check.
     let Ok(Some(workspace_state)) = pnpm_workspace_state::load_workspace_state(&lockfile_root)
     else {
-        return cannot_check_deps();
+        return fallback_or_cannot_check(
+            &config,
+            &manifest,
+            workspace_manifest.as_ref(),
+            &workspace_root,
+            &lockfile_root,
+        );
     };
     check_discovered_deps(
         &config,
@@ -79,6 +80,34 @@ pub fn check_deps_status_before_run_at(
         &lockfile_root,
         &workspace_state,
     )
+}
+
+fn gate_workspace_manifest(
+    workspace_dir_opt: Option<&Path>,
+) -> Result<Option<pnpm_workspace::WorkspaceManifest>, ()> {
+    workspace_dir_opt
+        .map(pnpm_workspace::read_workspace_manifest)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(|_| ())
+}
+
+fn fallback_or_cannot_check(
+    config: &Config,
+    manifest: &PackageManifest,
+    workspace_manifest: Option<&pnpm_workspace::WorkspaceManifest>,
+    workspace_root: &Path,
+    lockfile_root: &Path,
+) -> Option<crate::RunDepsStatus> {
+    installed_modules_match_lockfile(
+        config,
+        manifest,
+        workspace_manifest,
+        workspace_root,
+        lockfile_root,
+    )
+    .then_some(crate::RunDepsStatus::UpToDate)
+    .or_else(cannot_check_deps)
 }
 /// The directory the verify-deps-before-run gate serializes its installs
 /// over: the workspace root, or `dir` outside a workspace. Every gate in one
@@ -194,4 +223,176 @@ pub(super) fn configured_catalogs(
         Some(catalogs) => Some(catalogs),
         None => get_catalogs_from_workspace_manifest(workspace_manifest).ok(),
     }
+}
+
+/// Whether the modules tree already records `lockfile_root`'s wanted lockfile.
+///
+/// The workspace state file is how the run gate usually knows that. When the
+/// file is missing or unreadable, spawning an install opens the store index
+/// and contacts the registry. This check reads the lockfiles and the project
+/// manifests only.
+fn modules_layout_valid(config: &Config) -> bool {
+    let Ok(Some(modules)) =
+        pnpm_modules_yaml::read_modules_layout::<pnpm_modules_yaml::Host>(&config.modules_dir)
+    else {
+        return false;
+    };
+    crate::install::modules_layout_satisfies_run(&modules, config, config.node_linker)
+}
+
+const ALL_DEPENDENCY_GROUPS: IncludedDependencies = IncludedDependencies {
+    dependencies: true,
+    dev_dependencies: true,
+    optional_dependencies: true,
+};
+
+fn installed_modules_match_lockfile(
+    config: &Config,
+    manifest: &PackageManifest,
+    workspace_manifest: Option<&pnpm_workspace::WorkspaceManifest>,
+    workspace_root: &Path,
+    lockfile_root: &Path,
+) -> bool {
+    if !modules_layout_valid(config) {
+        return false;
+    }
+    let Ok(Some(wanted)) =
+        pnpm_lockfile::Lockfile::load_wanted(lockfile_root, &config.wanted_lockfile_selection())
+    else {
+        return false;
+    };
+    let virtual_store = virtual_store_dir_for(config, lockfile_root);
+    let Ok(Some(current)) =
+        pnpm_lockfile::Lockfile::load_current_from_virtual_store_dir(&virtual_store)
+    else {
+        return false;
+    };
+    crate::optimistic_repeat_install::materialized_shape_matches(
+        &wanted,
+        &current,
+        ALL_DEPENDENCY_GROUPS,
+        config.peer_edge_options(),
+    ) && manifests_match_lockfile(
+        config,
+        manifest,
+        workspace_manifest,
+        workspace_root,
+        lockfile_root,
+        &wanted,
+    )
+}
+
+fn virtual_store_dir_for(config: &Config, lockfile_root: &Path) -> std::path::PathBuf {
+    if config.explicit_settings.contains_key("virtualStoreDir")
+        || config.enable_global_virtual_store
+    {
+        config.effective_virtual_store_dir().to_path_buf()
+    } else if config.virtual_store_dir.starts_with(lockfile_root) {
+        config.virtual_store_dir.clone()
+    } else {
+        lockfile_root.join(&config.modules_dir).join(".pnpm")
+    }
+}
+
+fn load_projects(
+    config: &Config,
+    workspace_root: &Path,
+    workspace_manifest: Option<&pnpm_workspace::WorkspaceManifest>,
+) -> Result<Option<Vec<pnpm_workspace::Project>>, ()> {
+    let ignored = config.managed_directories();
+    config
+        .shares_one_lockfile()
+        .then(|| load_workspace_projects(workspace_root, workspace_manifest, &ignored))
+        .transpose()
+        .map(Option::flatten)
+        .map_err(|_| ())
+}
+
+fn manifests_match_lockfile(
+    config: &Config,
+    manifest: &PackageManifest,
+    workspace_manifest: Option<&pnpm_workspace::WorkspaceManifest>,
+    workspace_root: &Path,
+    lockfile_root: &Path,
+    wanted: &pnpm_lockfile::Lockfile,
+) -> bool {
+    let Ok(projects) = load_projects(config, workspace_root, workspace_manifest) else {
+        return false;
+    };
+    let manifests = build_project_manifests_list(manifest, projects.as_deref());
+    let Some(catalogs) = configured_catalogs(config, workspace_manifest) else {
+        return false;
+    };
+    if !lockfile_settings_up_to_date(config, wanted, &catalogs) {
+        return false;
+    }
+    let check = OptimisticRepeatInstallCheck {
+        workspace_root: lockfile_root,
+        config,
+        project_manifests: &manifests,
+        is_workspace_install: workspace_manifest.is_some(),
+        lockfile: MaybeLazyLockfile::Loaded(Some(wanted)),
+        catalogs: &catalogs,
+        layout: crate::RepeatInstallLayout {
+            node_linker: config.node_linker,
+            supported_architectures: config.supported_architectures.as_ref(),
+            included: ALL_DEPENDENCY_GROUPS,
+        },
+        manifest_freshness: crate::ManifestFreshness::Mtime,
+    };
+    crate::optimistic_repeat_install::first_project_missing_modules_dir(&check).is_none()
+        && projects_satisfy_lockfile(config, lockfile_root, &manifests, wanted)
+}
+
+fn lockfile_settings_up_to_date(
+    config: &Config,
+    wanted: &pnpm_lockfile::Lockfile,
+    catalogs: &Catalogs,
+) -> bool {
+    let Ok(parsed_overrides) = crate::install::parse_config_overrides(config, catalogs) else {
+        return false;
+    };
+    crate::install::check_lockfile_settings_drift(
+        wanted,
+        config,
+        catalogs,
+        crate::install::CheckLockfileSettingsDriftOptions {
+            parsed_overrides: parsed_overrides.as_deref(),
+            pnpmfile_checksum: pnpm_lockfile::PnpmfileChecksumCheck::Skip,
+            dedupe_peers: config.dedupe_peers,
+        },
+    )
+    .is_ok()
+}
+
+fn projects_satisfy_lockfile(
+    config: &Config,
+    lockfile_root: &Path,
+    manifests: &[(std::path::PathBuf, &PackageManifest)],
+    wanted: &pnpm_lockfile::Lockfile,
+) -> bool {
+    let ignored_optional = pnpm_matcher::create_matcher(
+        config.ignored_optional_dependencies.as_deref().unwrap_or_default(),
+    );
+    let is_ignored_optional = |name: &str| ignored_optional.matches(name);
+    manifests
+        .iter()
+        .all(|(dir, manifest)| {
+            let importer_id = if config.shares_one_lockfile() {
+                pnpm_workspace::importer_id_from_root_dir(lockfile_root, dir)
+            } else {
+                ".".to_owned()
+            };
+            wanted.importers
+                .get(&importer_id)
+                .is_some_and(|importer| {
+                    pnpm_lockfile::satisfies_package_manifest(
+                        importer,
+                        manifest,
+                        config.auto_install_peers,
+                        &is_ignored_optional,
+                    )
+                    .is_ok()
+                })
+        })
 }
