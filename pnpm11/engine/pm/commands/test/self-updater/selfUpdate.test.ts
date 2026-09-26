@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
@@ -1545,6 +1546,77 @@ describe('linkExePlatformBinary', () => {
     linkExePlatformBinary(dir)
   })
 
+  test('uses the JavaScript build when the native binary cannot be loaded', () => {
+    if (platform === 'win32') return
+    const dir = tempDir(false)
+    const exeDir = path.join(dir, 'node_modules', '@pnpm', 'exe')
+    const nativeDir = path.join(dir, 'node_modules', '@pnpm', platformPkgName)
+    fs.mkdirSync(exeDir, { recursive: true })
+    fs.mkdirSync(nativeDir, { recursive: true })
+    fs.mkdirSync(path.join(exeDir, 'dist'), { recursive: true })
+    fs.writeFileSync(path.join(exeDir, 'dist', 'pnpm.mjs'), "import { writeSync } from 'node:fs'\nwriteSync(1, 'from-js\\n')\n")
+    fs.writeFileSync(path.join(exeDir, executable), 'This file intentionally left blank')
+    fs.writeFileSync(path.join(nativeDir, executable), binaryWithMissingInterpreter())
+
+    linkExePlatformBinary(dir)
+    linkExePlatformBinary(dir)
+
+    const result = fs.readFileSync(path.join(exeDir, executable), 'utf8')
+    expect(result.startsWith('#!/bin/sh\n')).toBe(true)
+    expect(result).toContain('/dist/pnpm.mjs')
+    const execLine = result.split('\n').find((line) => line.startsWith('exec '))
+    expect(execLine?.startsWith("exec '/")).toBe(true)
+    expect(result.includes('exec node ')).toBe(false)
+    expect(fs.readdirSync(exeDir).some((name) => name.startsWith('.pnpm-js-launcher.'))).toBe(false)
+    expect(fs.readdirSync(nativeDir).some((name) => name.startsWith('.pnpm-bin-probe.'))).toBe(false)
+
+    const binDir = path.join(dir, 'bin')
+    fs.mkdirSync(binDir)
+    fs.symlinkSync(path.join('..', 'node_modules', '@pnpm', 'exe', executable), path.join(binDir, executable))
+    const run = spawnSync(path.join(binDir, executable), { encoding: 'utf8' })
+    expect(run.stderr).toBe('')
+    expect(run.status).toBe(0)
+    expect(run.stdout).toBe('from-js\n')
+  })
+
+  test('links the platform binary when the JavaScript build is absent', () => {
+    if (platform === 'win32') return
+    const dir = tempDir(false)
+    const exeDir = path.join(dir, 'node_modules', '@pnpm', 'exe')
+    const nativeDir = path.join(dir, 'node_modules', '@pnpm', platformPkgName)
+    fs.mkdirSync(exeDir, { recursive: true })
+    fs.mkdirSync(nativeDir, { recursive: true })
+    fs.writeFileSync(path.join(exeDir, executable), 'This file intentionally left blank')
+    fs.writeFileSync(path.join(nativeDir, executable), binaryWithMissingInterpreter())
+
+    linkExePlatformBinary(dir)
+
+    const result = fs.readFileSync(path.join(exeDir, executable))
+    expect(result.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))).toBe(true)
+  })
+
+  test('prefers a runnable libc sibling when the first binary cannot run', () => {
+    if (platform !== 'linux') return
+    const dir = tempDir(false)
+    const exeDir = path.join(dir, 'node_modules', '@pnpm', 'exe')
+    const nativeDir = path.join(dir, 'node_modules', '@pnpm', platformPkgName)
+    const alternateName = exePlatformPkgDirName(platform, arch, libcFamily === 'musl' ? null : 'musl')
+    const alternateDir = path.join(dir, 'node_modules', '@pnpm', alternateName)
+    fs.mkdirSync(exeDir, { recursive: true })
+    fs.mkdirSync(nativeDir, { recursive: true })
+    fs.mkdirSync(alternateDir, { recursive: true })
+    fs.mkdirSync(path.join(exeDir, 'dist'), { recursive: true })
+    fs.writeFileSync(path.join(exeDir, 'dist', 'pnpm.mjs'), 'export {}\n')
+    fs.writeFileSync(path.join(exeDir, executable), 'This file intentionally left blank')
+    fs.writeFileSync(path.join(nativeDir, executable), binaryWithMissingInterpreter())
+    const script = '#!/bin/sh\necho runnable-sibling\n'
+    fs.writeFileSync(path.join(alternateDir, executable), script)
+
+    linkExePlatformBinary(dir)
+
+    expect(fs.readFileSync(path.join(exeDir, executable), 'utf8')).toBe(script)
+  })
+
   test('does nothing when platform binary is not available', () => {
     const dir = tempDir(false)
     const exeDir = path.join(dir, 'node_modules', '@pnpm', 'exe')
@@ -1900,3 +1972,119 @@ describe('assertPnpmRuns', () => {
     }
   })
 })
+
+describe('node launcher guards', () => {
+  test('an empty PATH keeps the platform binary', () => {
+    if (process.platform === 'win32') return
+    const laid = layoutBrokenNative()
+    withPath('', () => {
+      linkExePlatformBinary(laid.dir)
+    })
+    expect(isElf(path.join(laid.exeDir, laid.executable))).toBe(true)
+  })
+
+  test('a directory named node keeps the platform binary', () => {
+    if (process.platform === 'win32') return
+    const laid = layoutBrokenNative()
+    const nodeDir = tempDir(false)
+    fs.mkdirSync(path.join(nodeDir, 'node'))
+    withPath(nodeDir, () => {
+      linkExePlatformBinary(laid.dir)
+    })
+    expect(isElf(path.join(laid.exeDir, laid.executable))).toBe(true)
+  })
+
+  test('a non-executable node keeps the platform binary', () => {
+    if (process.platform === 'win32') return
+    const laid = layoutBrokenNative()
+    const nodeDir = tempDir(false)
+    fs.writeFileSync(path.join(nodeDir, 'node'), '#!/bin/sh\n', { mode: 0o644 })
+    withPath(nodeDir, () => {
+      linkExePlatformBinary(laid.dir)
+    })
+    expect(isElf(path.join(laid.exeDir, laid.executable))).toBe(true)
+  })
+
+  test('a node path containing a newline keeps the platform binary', () => {
+    if (process.platform === 'win32') return
+    const laid = layoutBrokenNative()
+    const parent = tempDir(false)
+    const nodeDir = path.join(parent, 'a\nb')
+    fs.mkdirSync(nodeDir)
+    fs.writeFileSync(path.join(nodeDir, 'node'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    withPath(nodeDir, () => {
+      linkExePlatformBinary(laid.dir)
+    })
+    expect(isElf(path.join(laid.exeDir, laid.executable))).toBe(true)
+  })
+
+  test('the launcher quotes a node path that contains a single quote', () => {
+    if (process.platform === 'win32') return
+    const laid = layoutBrokenNative()
+    const root = tempDir(false)
+    const nodeDir = path.join(root, "o'node")
+    fs.mkdirSync(nodeDir)
+    const node = path.join(nodeDir, 'node')
+    fs.writeFileSync(node, '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+    withPath(nodeDir, () => {
+      linkExePlatformBinary(laid.dir)
+    })
+    const result = fs.readFileSync(path.join(laid.exeDir, laid.executable), 'utf8')
+    const quoted = `'${node.split("'").join("'\\''")}'`
+    expect(result).toContain(`exec ${quoted} `)
+    expect(result.includes(`exec ${node} `)).toBe(false)
+    expect(fs.readdirSync(laid.exeDir).some((name) => name.startsWith('.pnpm-js-launcher.'))).toBe(false)
+  })
+})
+
+function layoutBrokenNative (): { dir: string, exeDir: string, executable: string } {
+  const dir = tempDir(false)
+  const executable = process.platform === 'win32' ? 'pnpm.exe' : 'pnpm'
+  const platformPkgName = exePlatformPkgDirName(
+    process.platform,
+    process.platform === 'win32' && process.arch === 'ia32' ? 'x86' : process.arch,
+    familySync()
+  )
+  const exeDir = path.join(dir, 'node_modules', '@pnpm', 'exe')
+  const nativeDir = path.join(dir, 'node_modules', '@pnpm', platformPkgName)
+  fs.mkdirSync(exeDir, { recursive: true })
+  fs.mkdirSync(nativeDir, { recursive: true })
+  fs.mkdirSync(path.join(exeDir, 'dist'), { recursive: true })
+  fs.writeFileSync(path.join(exeDir, 'dist', 'pnpm.mjs'), 'export {}\n')
+  fs.writeFileSync(path.join(exeDir, executable), 'This file intentionally left blank')
+  fs.writeFileSync(path.join(nativeDir, executable), binaryWithMissingInterpreter())
+  return { dir, exeDir, executable }
+}
+
+function withPath (pathEnv: string, body: () => void): void {
+  const previous = process.env.PATH
+  process.env.PATH = pathEnv
+  try {
+    body()
+  } finally {
+    process.env.PATH = previous
+  }
+}
+
+function isElf (filePath: string): boolean {
+  return fs.readFileSync(filePath).subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+}
+
+function binaryWithMissingInterpreter (): Buffer {
+  const interpreter = Buffer.from('/no/such/pnpm-ld-10443.so\0')
+  const headerSize = 56
+  const interpreterOffset = 64 + headerSize
+  const elf = Buffer.alloc(interpreterOffset + interpreter.length)
+  elf.writeUInt32LE(0x464c457f, 0)
+  elf[4] = 2
+  elf[5] = 1
+  elf.writeUInt16LE(0xffff, 18)
+  elf.writeBigUInt64LE(BigInt(64), 32)
+  elf.writeUInt16LE(headerSize, 54)
+  elf.writeUInt16LE(1, 56)
+  elf.writeUInt32LE(3, 64)
+  elf.writeBigUInt64LE(BigInt(interpreterOffset), 72)
+  elf.writeBigUInt64LE(BigInt(interpreter.length), 96)
+  interpreter.copy(elf, interpreterOffset)
+  return elf
+}

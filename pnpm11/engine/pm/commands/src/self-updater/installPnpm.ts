@@ -1,4 +1,4 @@
-import type { SpawnSyncReturns } from 'node:child_process'
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -517,7 +517,9 @@ export function nativeTargetName (
 
 // The wrapper's preinstall links the platform binary into the wrapper dir, but
 // scripts are disabled during pnpm's own installs, so replicate it here — trying
-// the legacy and the newer `exe.<target>` platform-package names.
+// the legacy and the newer `exe.<target>` platform-package names. On Linux the
+// other libc is a candidate too: an unknown libc is not musl, so the glibc
+// package is first, and it cannot be loaded on Alpine.
 export function linkExePlatformBinary (installDir: string, wrapperPkgName: string = '@pnpm/exe'): void {
   const wrapperDir = path.join(installDir, 'node_modules', ...wrapperPkgName.split('/'))
   if (!fs.existsSync(wrapperDir)) return
@@ -535,56 +537,221 @@ export function linkExePlatformBinary (installDir: string, wrapperPkgName: strin
     adjacentScopeDir,
     path.join(installDir, 'node_modules', '@pnpm'),
   ])
-  const candidateDirNames = [
+  const sources = nativeBinaryCandidates(scopeDirs, platformBinaryDirNames(platform, arch, libcFamily), executable)
+  if (sources.length === 0) return
+  const dest = path.join(wrapperDir, executable)
+  const runnable = sources.find((source) => binaryRuns(source))
+  if (runnable != null) {
+    publishNativeBinary(runnable, dest, wrapperDir, platform)
+    return
+  }
+  // Alpine arm64 cannot load the published native builds, and `@pnpm/exe`
+  // ships dist/pnpm.mjs beside them. Node.js is already installed there.
+  if (publishNodeLauncher(wrapperRealDir, path.join(wrapperRealDir, executable))) return
+  const fallback = sources[0]
+  if (fallback == null) return
+  publishNativeBinary(fallback, dest, wrapperDir, platform)
+}
+
+function platformBinaryDirNames (
+  platform: NodeJS.Platform,
+  arch: string,
+  libcFamily: string | null
+): string[] {
+  const names = [
     exePlatformPkgDirName(platform, arch, libcFamily),
     exePlatformPkgDirNameNext(platform, arch, libcFamily),
   ]
-  let src: string | undefined
-  for (const scopeDir of scopeDirs) {
-    for (const dirName of candidateDirNames) {
-      const candidate = path.join(scopeDir, dirName, executable)
-      if (fs.existsSync(candidate)) {
-        src = candidate
-        break
+  if (platform !== 'linux') return names
+  const alternate = libcFamily === 'musl' ? null : 'musl'
+  for (const name of [
+    exePlatformPkgDirName(platform, arch, alternate),
+    exePlatformPkgDirNameNext(platform, arch, alternate),
+  ]) {
+    if (!names.includes(name)) names.push(name)
+  }
+  return names
+}
+
+function nativeBinaryCandidates (scopeDirs: Set<string>, dirNames: string[], executable: string): string[] {
+  const primary = dirNames.slice(0, 2)
+  const alternate = dirNames.slice(2)
+  const found: string[] = []
+  for (const group of [primary, alternate]) {
+    for (const scopeDir of scopeDirs) {
+      for (const dirName of group) {
+        const candidate = path.join(scopeDir, dirName, executable)
+        if (fs.existsSync(candidate) && !found.includes(candidate)) found.push(candidate)
       }
     }
-    if (src != null) break
   }
-  if (src == null) return
-  const dest = path.join(wrapperDir, executable)
+  return found
+}
+
+function publishNativeBinary (src: string, dest: string, wrapperDir: string, platform: NodeJS.Platform): void {
   forceLink(src, dest)
+  if (platform !== 'win32') return
+  // Aliases (pn / pnpx / pnx) need to be .exe hardlinks of the native binary,
+  // not the .cmd wrappers we ship in the tarball. cmd-shim's Bash shim for
+  // a .cmd target wraps it in `exec cmd /C ...`, and MSYS2 / Git Bash
+  // mangles `/C` into a Windows path — cmd.exe then falls into interactive
+  // mode and prints its banner instead of running the alias. .exe sources
+  // sidestep cmd-shim's wrapper. The native binary detects which name it was
+  // launched as via process.execPath and prepends `dlx` for pnpx / pnx.
+  // See https://github.com/pnpm/pnpm/issues/11486.
+  for (const alias of ['pn', 'pnpx', 'pnx']) {
+    forceLink(src, path.join(wrapperDir, `${alias}.exe`))
+  }
 
-  if (platform === 'win32') {
-    // Aliases (pn / pnpx / pnx) need to be .exe hardlinks of the native binary,
-    // not the .cmd wrappers we ship in the tarball. cmd-shim's Bash shim for
-    // a .cmd target wraps it in `exec cmd /C ...`, and MSYS2 / Git Bash
-    // mangles `/C` into a Windows path — cmd.exe then falls into interactive
-    // mode and prints its banner instead of running the alias. .exe sources
-    // sidestep cmd-shim's wrapper. The native binary detects which name it was
-    // launched as via process.execPath and prepends `dlx` for pnpx / pnx.
-    // See https://github.com/pnpm/pnpm/issues/11486.
-    for (const alias of ['pn', 'pnpx', 'pnx']) {
-      forceLink(src, path.join(wrapperDir, `${alias}.exe`))
-    }
-
-    const wrapperPkgJsonPath = path.join(wrapperDir, 'package.json')
-    const wrapperPkg = JSON.parse(fs.readFileSync(wrapperPkgJsonPath, 'utf8'))
-    wrapperPkg.bin.pnpm = 'pnpm.exe'
-    wrapperPkg.bin.pn = 'pn.exe'
-    wrapperPkg.bin.pnpx = 'pnpx.exe'
-    wrapperPkg.bin.pnx = 'pnx.exe'
-    // Temp file + rename, not in-place: package.json is hard-linked from the
-    // content-addressable store, so writing in place would mutate the shared blob.
-    const tempPkgJsonPath = `${wrapperPkgJsonPath}.pnpm-tmp`
+  const wrapperPkgJsonPath = path.join(wrapperDir, 'package.json')
+  const wrapperPkg = JSON.parse(fs.readFileSync(wrapperPkgJsonPath, 'utf8'))
+  wrapperPkg.bin.pnpm = 'pnpm.exe'
+  wrapperPkg.bin.pn = 'pn.exe'
+  wrapperPkg.bin.pnpx = 'pnpx.exe'
+  wrapperPkg.bin.pnx = 'pnx.exe'
+  // Temp file + rename, not in-place: package.json is hard-linked from the
+  // content-addressable store, so writing in place would mutate the shared blob.
+  const tempPkgJsonPath = `${wrapperPkgJsonPath}.pnpm-tmp`
+  try {
+    fs.writeFileSync(tempPkgJsonPath, JSON.stringify(wrapperPkg, null, 2))
+    fs.renameSync(tempPkgJsonPath, wrapperPkgJsonPath)
+  } catch (err: unknown) {
     try {
-      fs.writeFileSync(tempPkgJsonPath, JSON.stringify(wrapperPkg, null, 2))
-      fs.renameSync(tempPkgJsonPath, wrapperPkgJsonPath)
-    } catch (err: unknown) {
-      try {
-        fs.rmSync(tempPkgJsonPath, { force: true })
-      } catch {}
-      throw err
+      fs.rmSync(tempPkgJsonPath, { force: true })
+    } catch {}
+    throw err
+  }
+}
+
+let launcherTempSeq = 0
+let probeTempSeq = 0
+
+// True when this host can start `filePath`. A mode without the execute bit is
+// copied to a unique file beside it and marked executable first, because the
+// store blob is often not executable until it is linked. The copy is removed
+// before this returns. A binary that fails to load exits non-zero here.
+function binaryRuns (filePath: string): boolean {
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(filePath)
+  } catch {
+    return false
+  }
+  if (!stat.isFile()) return false
+  if (process.platform === 'win32' || (stat.mode & 0o111) !== 0) return commandSucceeded(filePath)
+  const probe = probeTempPath(path.dirname(filePath))
+  try {
+    fs.copyFileSync(filePath, probe)
+    fs.chmodSync(probe, 0o755)
+    return commandSucceeded(probe)
+  } catch {
+    return false
+  } finally {
+    try {
+      fs.rmSync(probe, { force: true })
+    } catch {}
+  }
+}
+
+function probeTempPath (dir: string): string {
+  probeTempSeq += 1
+  return path.join(dir, `.pnpm-bin-probe.${process.pid}.${probeTempSeq}.tmp`)
+}
+
+function commandSucceeded (filePath: string): boolean {
+  const result = spawnSync(filePath, ['--version'], {
+    timeout: 10_000,
+    stdio: 'ignore',
+    windowsHide: true,
+  })
+  return result.status === 0
+}
+
+// A temp path in `dir` that no other in-process publish shares.
+function launcherTempPath (dir: string): string {
+  launcherTempSeq += 1
+  return path.join(dir, `.pnpm-js-launcher.${process.pid}.${launcherTempSeq}.tmp`)
+}
+
+/**
+ * The `node` executable named by `pathEnv`, or `null` when that search does
+ * not find an absolute path. A directory or a non-executable file named
+ * `node` does not count. A path that cannot be embedded in the launcher
+ * script does not count either.
+ */
+function nodeExecutableFromPath (pathEnv: string | undefined): string | null {
+  if (pathEnv == null || pathEnv === '') return null
+  for (const dir of pathEnv.split(path.delimiter)) {
+    if (dir === '') continue
+    const candidate = path.resolve(dir, 'node')
+    if (candidate.includes('\n') || candidate.includes('\r')) continue
+    let stat: fs.Stats
+    try {
+      stat = fs.statSync(candidate)
+    } catch {
+      continue
     }
+    if (!stat.isFile()) continue
+    if (process.platform !== 'win32' && (stat.mode & 0o111) === 0) continue
+    return candidate
+  }
+  return null
+}
+
+function shSingleQuote (text: string): string {
+  return `'${text.split("'").join("'\\''")}'`
+}
+
+// Shell script that runs dist/pnpm.mjs with `node`. `node` is embedded as a
+// single-quoted absolute path, so the script does not search PATH again.
+function nodeLauncherScript (node: string): string | null {
+  if (node.includes('\n') || node.includes('\r')) return null
+  const quoted = shSingleQuote(node)
+  return [
+    '#!/bin/sh',
+    'target=$0',
+    'while [ -L "$target" ]; do',
+    '  parent=$(CDPATH= cd -- "$(dirname "$target")" && pwd) || exit 1',
+    '  link=$(readlink "$target") || exit 1',
+    '  case $link in',
+    '    /*) target=$link ;;',
+    '    *) target="$parent/$link" ;;',
+    '  esac',
+    'done',
+    'dir=$(CDPATH= cd -- "$(dirname "$target")" && pwd) || exit 1',
+    `exec ${quoted} "$dir/dist/pnpm.mjs" "$@"`,
+    '',
+  ].join('\n')
+}
+
+function publishNodeLauncher (wrapperRealDir: string, dest: string): boolean {
+  if (process.platform === 'win32') return false
+  const jsEntry = path.join(wrapperRealDir, 'dist', 'pnpm.mjs')
+  const node = nodeExecutableFromPath(process.env.PATH)
+  if (!isRegularFile(jsEntry) || node == null) return false
+  const script = nodeLauncherScript(node)
+  if (script == null) return false
+  // `bin/pnpm` is a symlink to this file. The script resolves `$0` before
+  // locating `dist/pnpm.mjs` next to the real file. The temp file is renamed
+  // onto dest so a hard-linked store blob is not rewritten in place.
+  const temp = launcherTempPath(wrapperRealDir)
+  try {
+    fs.writeFileSync(temp, script, { mode: 0o755 })
+    fs.renameSync(temp, dest)
+  } catch (err: unknown) {
+    try {
+      fs.rmSync(temp, { force: true })
+    } catch {}
+    throw err
+  }
+  return true
+}
+
+function isRegularFile (filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile()
+  } catch {
+    return false
   }
 }
 
