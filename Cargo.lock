@@ -6050,6 +6050,7 @@ dependencies = [
  "pnpm-package-name",
  "pnpm-patching",
  "pnpm-resolving-jsr-specifier-parser",
+ "pnpm-resolving-npm-resolver",
  "pnpm-resolving-parse-wanted-dependency",
  "pnpm-resolving-resolver-base",
  "pnpm-semver-include-prerelease",
@@ -6186,7 +6187,10 @@ dependencies = [
 name = "pnpm-resolving-tarball-resolver"
 version = "0.0.1"
 dependencies = [
+ "httpdate",
  "mockito",
+ "pnpm-crypto-hash",
+ "pnpm-fs",
  "pnpm-lockfile",
  "pnpm-network",
  "pnpm-reporter",
