@@ -1,3 +1,4 @@
+import fs from 'node:fs'
 import path from 'node:path'
 
 import { expect, test } from '@jest/globals'
@@ -1058,6 +1059,102 @@ test('a package entry keeps the declared peerDependencies ranges when the graph 
   // written above.
   await install(manifest('100.1.0'), opts())
   expect(declaredPeerRanges()).toStrictEqual(expectedPeerRanges)
+})
+
+test('re-resolution keeps a recorded peer range when the resolved manifest peer range is replaced', async () => {
+  await addDistTag({ package: '@pnpm.e2e/peer-a', version: '1.0.0', distTag: 'latest' })
+  await addDistTag({ package: '@pnpm.e2e/peer-c', version: '1.0.1', distTag: 'latest' })
+  const project = prepareEmpty()
+  // Stands in for the registry manifest mutation: the package's own manifest
+  // declares `*`, and a later resolve reports the sibling range's lower bound.
+  let replacePeerRange = false
+  const readPackage = (manifest: PackageManifest): PackageManifest => {
+    if (
+      replacePeerRange &&
+      manifest.name === '@pnpm.e2e/pkg-with-events-and-peers' &&
+      manifest.peerDependencies != null
+    ) {
+      manifest.peerDependencies['@pnpm.e2e/peer-c'] = '1.0.0'
+    }
+    return manifest
+  }
+  const manifest = (fooVersion: string): PackageManifest => ({
+    name: 'root',
+    version: '0.0.0',
+    dependencies: {
+      '@pnpm.e2e/abc-optional-peers': '1.0.0',
+      '@pnpm.e2e/foo': fooVersion,
+      '@pnpm.e2e/pkg-with-events-and-peers': '1.0.0',
+    },
+  })
+  const opts = () => testDefaults({
+    autoInstallPeers: true,
+    hooks: {
+      readPackage: [readPackage],
+      // A programmatic hook with no checksum forces a full resolution, which
+      // re-reads the live manifest. A stable checksum is what an unchanged
+      // pnpmfile has, so this re-resolution reuses the recorded ranges.
+      calculatePnpmfileChecksum: async () => 'test-pnpmfile-checksum',
+    },
+    minimumReleaseAge: 1440,
+  })
+
+  await install(manifest('100.0.0'), opts())
+  const peerRange = () => project.readLockfile()
+    .packages['@pnpm.e2e/pkg-with-events-and-peers@1.0.0']
+    .peerDependencies?.['@pnpm.e2e/peer-c']
+  expect(peerRange()).toBe('*')
+  expect(project.readLockfile().packages['@pnpm.e2e/abc-optional-peers@1.0.0'].peerDependencies)
+    .toStrictEqual({
+      '@pnpm.e2e/peer-a': '^1.0.0',
+      '@pnpm.e2e/peer-b': '^1.0.0',
+      '@pnpm.e2e/peer-c': '^1.0.0',
+    })
+
+  replacePeerRange = true
+  await install(manifest('100.1.0'), opts())
+  expect(peerRange()).toBe('*')
+  expect(project.readLockfile().packages['@pnpm.e2e/abc-optional-peers@1.0.0'].peerDependencies?.['@pnpm.e2e/peer-c'])
+    .toBe('^1.0.0')
+
+  // A pnpmfile change is a new manifest policy, so the live range is recorded.
+  await install(manifest('100.1.0'), testDefaults({
+    autoInstallPeers: true,
+    hooks: {
+      readPackage: [readPackage],
+      calculatePnpmfileChecksum: async () => 'edited-pnpmfile-checksum',
+    },
+    minimumReleaseAge: 1440,
+  }))
+  expect(peerRange()).toBe('1.0.0')
+})
+
+test('a directory dependency records a changed peer range on reinstall', async () => {
+  const project = prepareEmpty()
+  fs.mkdirSync('local-pkg')
+  const writeLocalPkg = (peerRange: string): void => {
+    fs.writeFileSync('local-pkg/package.json', JSON.stringify({
+      name: 'local-pkg',
+      version: '1.0.0',
+      peerDependencies: { 'is-positive': peerRange },
+    }), 'utf8')
+  }
+  writeLocalPkg('*')
+  const manifest: PackageManifest = {
+    name: 'root',
+    version: '0.0.0',
+    dependencies: { 'local-pkg': 'file:local-pkg' },
+  }
+  const peerRange = () => project.readLockfile()
+    .packages['local-pkg@file:local-pkg']
+    ?.peerDependencies?.['is-positive']
+
+  await install(manifest, testDefaults({ autoInstallPeers: true }))
+  expect(peerRange()).toBe('*')
+
+  writeLocalPkg('1.0.0')
+  await install(manifest, testDefaults({ autoInstallPeers: true }))
+  expect(peerRange()).toBe('1.0.0')
 })
 
 test.each([false, true])('auto installs transitive peers shared at different depths (reverse importers: %s)', async (reverse) => {
