@@ -399,8 +399,9 @@ pub fn link_new_bins_from_locations(
 }
 /// Top-level bin link that links direct-dep candidates, publicly hoisted
 /// aliases, and auto-installed peer dependencies in a single
-/// [`link_bins_of_packages`] pass so direct dependencies take precedence
-/// over publicly hoisted packages, which take precedence over auto-installed peers.
+/// [`link_bins_of_packages`] pass so [`pnpm_cmd_shim::choose_bins`]
+/// applies precedence: direct dependencies over publicly hoisted
+/// packages, and those over auto-installed peers.
 ///
 /// Direct deps come from the importer's dependency groups, hoisted
 /// aliases from the hoist result, and peers from their resolved slots.
@@ -418,15 +419,15 @@ pub fn link_top_level_bins(
     link_options: &LinkBinsOptions,
 ) -> Result<(), LinkBinsError> {
     let mut bin_sources: Vec<PackageBinSource> = Vec::new();
-    // Tag direct deps as `Direct` and hoisted as `Hoisted` so the
-    // single downstream `pick_winner` call resolves conflicts via
-    // the new [`BinOrigin`] tier.
+    // Tag direct deps as `Direct` and hoisted as `Hoisted` so
+    // [`pnpm_cmd_shim::choose_bins`] resolves conflicts via the
+    // [`BinOrigin`] tier.
     for source in read_bin_sources(modules_dir, direct_dep_names)? {
         bin_sources.push(source.with_origin(BinOrigin::Direct));
     }
     // Skip hoisted aliases that already appear under a direct
     // name. Reading the same `package.json` twice wouldn't change
-    // the outcome — `pick_winner` would pick the Direct copy
+    // the outcome — [`pnpm_cmd_shim::choose_bins`] would pick the Direct copy
     // anyway — but the work is wasted, so de-duplicate here by
     // filtering out hoisted candidates whose name already appears
     // in the direct set.

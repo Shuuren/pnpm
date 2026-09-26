@@ -455,12 +455,18 @@ async function linkAllBins (modulesDir: string, opts: LinkAllBinsOptions): Promi
       preferSymlinkedExecutables: opts.preferSymlinkedExecutables,
       warn,
     })
-  } catch (err: any) { // eslint-disable-line
+  } catch (err: unknown) {
+    if (isBinariesConflict(err)) throw err
     // Some packages generate their commands with lifecycle hooks.
     // At this stage, such commands are not generated yet.
     // For now, we don't hoist such generated commands.
     // Related issue: https://github.com/pnpm/pnpm/issues/2071
   }
+}
+
+function isBinariesConflict (err: unknown): boolean {
+  return typeof err === 'object' && err != null && 'code' in err &&
+    (err as { code: unknown }).code === 'ERR_PNPM_BINARIES_CONFLICT'
 }
 
 function getDependencies<T extends string> (

@@ -16,7 +16,6 @@ use crate::{
 };
 use derive_more::{Display, Error};
 use miette::Diagnostic;
-use node_semver::Version;
 use pnpm_package_manifest::parse_manifest_bytes;
 use rayon::prelude::*;
 use serde_json::Value;
@@ -112,9 +111,12 @@ impl PackageBinSource {
     }
 }
 
-/// Origin of a [`PackageBinSource`] determining precedence during conflict resolution:
-/// direct dependencies take precedence over publicly hoisted packages, which take precedence
-/// over auto-installed peers.
+/// Origin of a [`PackageBinSource`], the precedence tier [`choose_bins`]
+/// uses for a shared command name.
+///
+/// A direct dependency takes precedence over a publicly hoisted package,
+/// which takes precedence over an auto-installed peer. Lower tiers for
+/// that name are dropped before ownership is considered.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum BinOrigin {
     /// The candidate is a direct dependency of the importer
@@ -228,6 +230,13 @@ pub enum LinkBinsError {
         #[error(source)]
         error: io::Error,
     },
+
+    #[display("Cannot link binary \"{bin_name}\": {providers} provide it")]
+    #[diagnostic(
+        code(ERR_PNPM_BINARIES_CONFLICT),
+        help("Remove one of the dependencies that provides this binary.")
+    )]
+    BinariesConflict { bin_name: String, providers: String },
 }
 
 /// Memo of per-target probe work shared across [`link_bins_of_packages_cached`]
@@ -439,7 +448,7 @@ where
         + FsSetExecutable
         + FsEnsureExecutableBits,
 {
-    let chosen = choose_bins::<Sys>(packages, exclude_bins);
+    let chosen = choose_bins::<Sys>(packages, exclude_bins)?;
     if chosen.is_empty() {
         return Ok(false);
     }
@@ -487,27 +496,125 @@ where
 }
 
 /// The bins `packages` provide, minus `exclude_bins`, each paired with the
-/// package providing it. A name several packages provide goes to the one
-/// that owns it, else to the first by name and highest version.
-#[must_use]
+/// package providing it.
+///
+/// A direct dependency's command hides the same command from a hoisted
+/// dependency and from an auto-installed peer. A hoisted command hides
+/// the same command from an auto-installed peer. Among the commands that
+/// remain, the package that owns the name supplies it when it is the only
+/// owner. Every other shared name is [`LinkBinsError::BinariesConflict`].
 pub fn choose_bins<'packages, Sys: FsWalkFiles>(
     packages: &'packages [PackageBinSource],
     exclude_bins: &std::collections::HashSet<String>,
-) -> Vec<(Command, &'packages PackageBinSource)> {
-    let mut chosen: HashMap<String, (Command, &PackageBinSource)> = HashMap::new();
+) -> Result<Vec<(Command, &'packages PackageBinSource)>, LinkBinsError> {
+    let mut groups: HashMap<String, Vec<(Command, &PackageBinSource)>> = HashMap::new();
     for pkg in packages {
         for command in get_bins_from_package_manifest::<Sys>(&pkg.manifest, &pkg.location) {
-            let wins = chosen
-                .get(&command.name)
-                .is_none_or(|(_, existing)| pick_winner(&command.name, existing, pkg));
-            if wins {
-                chosen.insert(command.name.clone(), (command, pkg));
-            }
+            groups
+                .entry(command.name.clone())
+                .or_default()
+                .push((command, pkg));
         }
     }
     let excluded = ExcludedBins::new(exclude_bins);
-    chosen.retain(|name, _| !excluded.contains(name));
-    chosen.into_values().collect()
+    let mut chosen = Vec::new();
+    for (name, candidates) in groups {
+        if excluded.contains(&name) {
+            continue;
+        }
+        let selected = select_bin_provider(&name, candidates)?;
+        chosen.push(selected);
+    }
+    Ok(chosen)
+}
+
+fn select_bin_provider<'a>(
+    bin_name: &str,
+    mut candidates: Vec<(Command, &'a PackageBinSource)>,
+) -> Result<(Command, &'a PackageBinSource), LinkBinsError> {
+    if candidates
+        .iter()
+        .any(|(_, pkg)| pkg.origin == BinOrigin::Direct)
+    {
+        candidates.retain(|(_, pkg)| pkg.origin == BinOrigin::Direct);
+    } else if candidates
+        .iter()
+        .any(|(_, pkg)| pkg.origin == BinOrigin::Hoisted)
+    {
+        candidates.retain(|(_, pkg)| pkg.origin == BinOrigin::Hoisted);
+    }
+    if candidates.len() > 1 {
+        candidates = distinct_bin_providers(candidates);
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0));
+    }
+    let mut owner_at = None;
+    let mut extra_owner = false;
+    for (index, (_, pkg)) in candidates.iter().enumerate() {
+        if !pkg_owns_bin(bin_name, package_name(pkg)) {
+            continue;
+        }
+        if owner_at.is_some() {
+            extra_owner = true;
+            break;
+        }
+        owner_at = Some(index);
+    }
+    if let Some(index) = owner_at.filter(|_| !extra_owner) {
+        return Ok(candidates.swap_remove(index));
+    }
+    Err(binaries_conflict(bin_name, &candidates))
+}
+
+fn distinct_bin_providers(
+    candidates: Vec<(Command, &PackageBinSource)>,
+) -> Vec<(Command, &PackageBinSource)> {
+    let mut seen = HashSet::new();
+    let mut distinct = Vec::new();
+    for candidate in candidates {
+        if seen.insert(candidate.1.location.clone()) {
+            distinct.push(candidate);
+        }
+    }
+    distinct
+}
+
+fn binaries_conflict(bin_name: &str, providers: &[(Command, &PackageBinSource)]) -> LinkBinsError {
+    let mut labels: Vec<String> = providers
+        .iter()
+        .map(|(_, pkg)| provider_label(pkg))
+        .collect();
+    labels.sort();
+    LinkBinsError::BinariesConflict { bin_name: bin_name.to_owned(), providers: labels.join(", ") }
+}
+
+fn provider_label(pkg: &PackageBinSource) -> String {
+    let name = package_name(pkg);
+    let version = pkg.manifest
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let id = if version.is_empty() { name.to_owned() } else { format!("{name}@{version}") };
+    let alias = package_alias(&pkg.location);
+    if alias == name || alias.is_empty() {
+        format!("\"{id}\"")
+    } else {
+        format!("\"{alias}\" ({id})")
+    }
+}
+
+fn package_alias(location: &Path) -> String {
+    let base = location
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let parent = location
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    if parent.starts_with('@') { format!("{parent}/{base}") } else { base.to_owned() }
 }
 
 /// Whether the bins of `pkg_name` get a PowerShell shim next to the `.cmd`
@@ -520,45 +627,11 @@ fn wants_powershell_shim(pkg_name: &str) -> bool {
     !matches!(pkg_name, "pnpm" | "@pnpm/exe")
 }
 
-/// Return `true` when `candidate` should replace `existing` for `bin_name`.
-fn pick_winner(bin_name: &str, existing: &PackageBinSource, candidate: &PackageBinSource) -> bool {
-    match (existing.origin, candidate.origin) {
-        (BinOrigin::Direct, BinOrigin::Hoisted | BinOrigin::Peer)
-        | (BinOrigin::Hoisted, BinOrigin::Peer) => return false,
-        (BinOrigin::Hoisted | BinOrigin::Peer, BinOrigin::Direct)
-        | (BinOrigin::Peer, BinOrigin::Hoisted) => return true,
-        _ => {}
-    }
-    let existing_name = package_name(existing);
-    let candidate_name = package_name(candidate);
-    let existing_owns = pkg_owns_bin(bin_name, existing_name);
-    let candidate_owns = pkg_owns_bin(bin_name, candidate_name);
-    match (existing_owns, candidate_owns) {
-        (true, false) => return false,
-        (false, true) => return true,
-        _ => {}
-    }
-    if candidate_name != existing_name {
-        return candidate_name < existing_name;
-    }
-    match (package_version(existing), package_version(candidate)) {
-        (Some(existing_version), Some(candidate_version)) => candidate_version > existing_version,
-        _ => false,
-    }
-}
-
 fn package_name(pkg: &PackageBinSource) -> &str {
     pkg.manifest
         .get("name")
         .and_then(Value::as_str)
         .unwrap_or("")
-}
-
-fn package_version(pkg: &PackageBinSource) -> Option<Version> {
-    pkg.manifest
-        .get("version")
-        .and_then(Value::as_str)
-        .and_then(|version| Version::parse(version).ok())
 }
 
 #[cfg(test)]

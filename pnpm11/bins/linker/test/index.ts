@@ -702,62 +702,32 @@ test('linkBins() resolves conflicts. Prefer packages that use their name as bin 
   }
 })
 
-test('linkBins() resolves conflicts. Prefer packages whose name is greater in localeCompare', async () => {
+test('linkBins() fails when two packages provide the same bin and neither owns it', async () => {
   const binTarget = temporaryDirectory()
   const binNameConflictsFixture = f.prepare('bin-name-conflicts-no-own-name')
   const warn = jest.fn()
 
-  await linkBins(path.join(binNameConflictsFixture, 'node_modules'), binTarget, { warn })
-
-  expect(binsConflictLogger.debug).toHaveBeenCalledWith({
-    binaryName: 'my-command',
-    binsDir: binTarget,
-    linkedPkgName: 'foo',
-    linkedPkgVersion: expect.any(String),
-    skippedPkgName: 'bar',
-    skippedPkgVersion: expect.any(String),
+  await expect(
+    linkBins(path.join(binNameConflictsFixture, 'node_modules'), binTarget, { warn })
+  ).rejects.toMatchObject({
+    code: 'ERR_PNPM_BINARIES_CONFLICT',
+    message: 'Cannot link binary "my-command": "bar@1.0.0", "foo@1.0.0" provide it',
   })
-  expect(fs.readdirSync(binTarget)).toEqual(getExpectedBins(['my-command']))
-
-  {
-    const binLocation = path.join(binTarget, 'my-command')
-    expect(fs.existsSync(binLocation)).toBe(true)
-    const content = fs.readFileSync(binLocation, 'utf8')
-    expect(content).toMatch('node_modules/foo/index.js')
-  }
+  expect(fs.existsSync(path.join(binTarget, 'my-command'))).toBe(false)
 })
 
-test('linkBins() resolves conflicts. Prefer the latest version of the same package', async () => {
+test('linkBins() fails when two copies of one package provide the same bin', async () => {
   const binTarget = temporaryDirectory()
   const binNameConflictsFixture = f.prepare('different-versions')
   const warn = jest.fn()
 
-  await linkBins(path.join(binNameConflictsFixture, 'node_modules'), binTarget, { warn })
-
-  expect(binsConflictLogger.debug).toHaveBeenCalledWith({
-    binaryName: 'my-command',
-    binsDir: binTarget,
-    linkedPkgName: 'my-command',
-    linkedPkgVersion: expect.any(String),
-    skippedPkgName: 'my-command',
-    skippedPkgVersion: '1.0.0',
+  await expect(
+    linkBins(path.join(binNameConflictsFixture, 'node_modules'), binTarget, { warn })
+  ).rejects.toMatchObject({
+    code: 'ERR_PNPM_BINARIES_CONFLICT',
+    message: 'Cannot link binary "my-command": "my-command-greater" (my-command@1.2.0), "my-command-lesser" (my-command@1.0.0), "my-command-middle" (my-command@1.1.0) provide it',
   })
-  expect(binsConflictLogger.debug).toHaveBeenCalledWith({
-    binaryName: 'my-command',
-    binsDir: binTarget,
-    linkedPkgName: 'my-command',
-    linkedPkgVersion: expect.any(String),
-    skippedPkgName: 'my-command',
-    skippedPkgVersion: '1.1.0',
-  })
-  expect(fs.readdirSync(binTarget)).toEqual(getExpectedBins(['my-command']))
-
-  {
-    const binLocation = path.join(binTarget, 'my-command')
-    expect(fs.existsSync(binLocation)).toBe(true)
-    const content = fs.readFileSync(binLocation, 'utf8')
-    expect(content).toMatch('node_modules/my-command-greater/index.js')
-  }
+  expect(fs.existsSync(path.join(binTarget, 'my-command'))).toBe(false)
 })
 
 test('linkBinsOfPackages() resolves conflicts. Prefer packages that use their name as bin name', async () => {
@@ -809,58 +779,75 @@ test('linkBinsOfPackages() resolves conflicts. Prefer packages that use their na
   }
 })
 
-test('linkBinsOfPackages() resolves conflicts. Prefer the latest version', async () => {
+test('linkBinsOfPackages() fails when aliased copies of one package provide the same bin', async () => {
   const binTarget = temporaryDirectory()
-  const binNameConflictsFixture = f.prepare('different-versions')
+  const modules = temporaryDirectory()
+  const prettier3 = path.join(modules, 'prettier')
+  const prettier2 = path.join(modules, 'prettier-2')
+  fs.mkdirSync(prettier3)
+  fs.mkdirSync(prettier2)
+  fs.writeFileSync(path.join(prettier3, 'index.js'), '#!/usr/bin/env node\nconsole.log("3")\n')
+  fs.writeFileSync(path.join(prettier2, 'index.js'), '#!/usr/bin/env node\nconsole.log("2")\n')
 
-  const modulesPath = path.join(binNameConflictsFixture, 'node_modules')
+  await expect(
+    linkBinsOfPackages(
+      [
+        {
+          location: prettier3,
+          manifest: {
+            name: 'prettier',
+            version: '3.0.3',
+            bin: { prettier: 'index.js' },
+          },
+        },
+        {
+          location: prettier2,
+          manifest: {
+            name: 'prettier',
+            version: '2.8.8',
+            bin: { prettier: 'index.js' },
+          },
+        },
+      ],
+      binTarget
+    )
+  ).rejects.toMatchObject({
+    code: 'ERR_PNPM_BINARIES_CONFLICT',
+    message: 'Cannot link binary "prettier": "prettier-2" (prettier@2.8.8), "prettier@3.0.3" provide it',
+  })
+  expect(fs.existsSync(path.join(binTarget, 'prettier'))).toBe(false)
+})
+
+test('linkBinsOfPackages() links bins that do not share a name', async () => {
+  const binTarget = temporaryDirectory()
+  const leftDir = temporaryDirectory()
+  const rightDir = temporaryDirectory()
+  fs.writeFileSync(path.join(leftDir, 'index.js'), '#!/usr/bin/env node\n')
+  fs.writeFileSync(path.join(rightDir, 'index.js'), '#!/usr/bin/env node\n')
 
   await linkBinsOfPackages(
     [
       {
-        location: path.join(modulesPath, 'my-command-lesser'),
-        manifest: (await import(path.join(modulesPath, 'my-command-lesser', 'package.json'))).default,
+        location: leftDir,
+        manifest: {
+          name: 'left-tool',
+          version: '1.0.0',
+          bin: { left: 'index.js' },
+        },
       },
       {
-        location: path.join(modulesPath, 'my-command-middle'),
-        manifest: (await import(path.join(modulesPath, 'my-command-middle', 'package.json'))).default,
-      },
-      {
-        location: path.join(modulesPath, 'my-command-greater'),
-        manifest: (await import(path.join(modulesPath, 'my-command-greater', 'package.json'))).default,
+        location: rightDir,
+        manifest: {
+          name: 'right-tool',
+          version: '1.0.0',
+          bin: { right: 'index.js' },
+        },
       },
     ],
     binTarget
   )
 
-  expect(binsConflictLogger.debug).toHaveBeenCalledWith({
-    binaryName: 'my-command',
-    binsDir: binTarget,
-    linkedPkgAlias: undefined,
-    linkedPkgName: 'my-command',
-    linkedPkgVersion: expect.any(String),
-    skippedPkgAlias: undefined,
-    skippedPkgName: 'my-command',
-    skippedPkgVersion: '1.0.0',
-  })
-  expect(binsConflictLogger.debug).toHaveBeenCalledWith({
-    binaryName: 'my-command',
-    binsDir: binTarget,
-    linkedPkgAlias: undefined,
-    linkedPkgName: 'my-command',
-    linkedPkgVersion: expect.any(String),
-    skippedPkgAlias: undefined,
-    skippedPkgName: 'my-command',
-    skippedPkgVersion: '1.1.0',
-  })
-  expect(fs.readdirSync(binTarget)).toEqual(getExpectedBins(['my-command']))
-
-  {
-    const binLocation = path.join(binTarget, 'my-command')
-    expect(fs.existsSync(binLocation)).toBe(true)
-    const content = fs.readFileSync(binLocation, 'utf8')
-    expect(content).toMatch('node_modules/my-command-greater/index.js')
-  }
+  expect(fs.readdirSync(binTarget).sort()).toEqual(getExpectedBins(['left', 'right']))
 })
 
 test('linkBins() resolves conflicts. Prefer packages are direct dependencies', async () => {

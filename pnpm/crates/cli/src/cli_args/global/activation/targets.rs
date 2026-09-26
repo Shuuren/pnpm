@@ -21,7 +21,10 @@ pub(super) fn get_actual_bins<Sys: FsWalkFiles>(
     bins_to_skip: &HashSet<String>,
 ) -> miette::Result<BTreeMap<String, PathBuf>> {
     let mut actual_bins = BTreeMap::new();
-    for (command, _) in choose_bins::<Sys>(packages, bins_to_skip) {
+    for (command, _) in choose_bins::<Sys>(packages, bins_to_skip)
+        .into_diagnostic()
+        .wrap_err("resolve global package bins")?
+    {
         if command.path
             .try_exists()
             .into_diagnostic()
